@@ -16,32 +16,36 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import roc_auc_score
 
 # --- your models & loss
-from src.models import deepmaxent_model, deepmaxent_loss
+from src.models import deepmaxent_model, deepmaxent_loss, deepmaxent_model_w_bias
 
 
 # =========================
 # Config
 # =========================
-REGION = "AWT"                  # <-- change this to switch region (e.g., "XYZ")
+REGION = "AWT"                  # "AWT", "CAN", "NSW", "SWI", "NZ"
 ADD_PO_VAR = False               # whether to add the presence-only indicator feature
 ADD_PA_DATA = False              # whether to add half of the PA data to training¿
-GROUP = "_plant"           # keep "bird" as in your code
+GROUP = "_plant"       
+BIAS_MODEL = False            # whether to use the model with per-plot bias
 
 # COVARIATES: List[str] = [
 #     "age","deficit","dem","hillshade","mas","mat","r2pet","rain","slope","sseas","toxicats","tseas","vpd"
 # ]
 
 # Model / training
-HIDDEN_SIZE = 300
-HIDDEN_LAYERS = 3
+HIDDEN_SIZE = 250
+HIDDEN_LAYERS = 2
 LR = 1e-4
-EPOCHS = 500              
-BATCH_SIZE = 1024               
+EPOCHS = 200              
+BATCH_SIZE = 250
+MAX_BATCH_PERCENTAGE = 1  # max batch size as percentage of training data               
 PRINT_EVERY = 1000
 
 # Reproducibility
 SEED = 42
 
+# SWI bias: 0.8469
+# SWI no bias:
 
 # =========================
 # Utils
@@ -67,15 +71,20 @@ def build_paths(region: str, group_filter: str) -> Tuple[str, str, str]:
 
 
 class XYDataset(Dataset):
-    def __init__(self, X: np.ndarray, Y: np.ndarray):
+    def __init__(self, X: np.ndarray, Y: np.ndarray, plot_ids: np.ndarray | None = None):
         self.X = torch.tensor(X, dtype=torch.float32)
         self.Y = torch.tensor(Y, dtype=torch.float32)
+        self.plot_ids = None if plot_ids is None else torch.tensor(plot_ids, dtype=torch.long)
 
     def __len__(self) -> int:
         return self.X.shape[0]
 
     def __getitem__(self, idx: int):
-        return self.X[idx], self.Y[idx]
+        if self.plot_ids is None:
+            return self.X[idx], self.Y[idx]
+        else:
+            return self.X[idx], self.Y[idx], self.plot_ids[idx]
+
 
 
 def safe_reindex_columns(df: pd.DataFrame, cols: List[str]) -> pd.DataFrame:
@@ -104,7 +113,7 @@ def load_data(region: str, group_filter: str, add_po_var: bool):
     df_env = pd.read_csv(env_path)
     # covariates are from 5th column onward
     covariates = df_env.columns[4:].tolist()
-    print(f'Data loaded for {region}: PO Data {df_po.shape}, PA Data {df_pa.shape}, ENV Data {df_env.shape}')
+    # print(f'Data loaded for {region}: PO Data {df_po.shape}, PA Data {df_pa.shape}, ENV Data {df_env.shape}')
 
     # Species list from PO data
     unique_species = df_po["spid"].unique().tolist()
@@ -137,7 +146,10 @@ def load_data(region: str, group_filter: str, add_po_var: bool):
         X_test["PO"] = 0
 
     # Align X_po and Y_po by (x, y)
+    
     XY_po = pd.merge(X_po, Y_po, on=["x", "y"], how="inner")
+
+
     # Split columns
     X = XY_po[["x", "y"] + covariates + (["PO"] if add_po_var and "PO" not in covariates else [])].copy()
     # Ensure covariate list includes PO if requested
@@ -151,7 +163,7 @@ def load_data(region: str, group_filter: str, add_po_var: bool):
 
     if ADD_PA_DATA:
         # at least 2 rows extra for adding
-        perc = 1-min(0.99, 1 - 2 / len(X_test))
+        perc = 1-min(0.5, 1 - 2 / len(X_test))
         print('percentage for PA split:', perc)
         X_test_half, X_extra, Y_test_half, Y_extra = train_test_split(
             X_test, Y_test, test_size=perc, random_state=SEED
@@ -165,6 +177,9 @@ def load_data(region: str, group_filter: str, add_po_var: bool):
         Y_full = Y.copy()
         X_test_half = X_test.copy()
         Y_test_half = Y_test.copy()
+
+    # print final shapes (after aggregating), refering train (PO), test (PA)
+    print(f"Final shapes for {region} {group_filter}:\n Train X {X_full.shape}, Train Y {Y_full.shape}, Test X {X_test_half.shape}, Test Y {Y_test_half.shape}")
 
     return X_full, Y_full, X_test_half, Y_test_half, unique_species, covs
 
@@ -193,21 +208,25 @@ def train_model(
     lr: float = 1e-4,
     print_every: int = 100,
     dev: torch.device | None = None,
-    verbose: bool = True
+    verbose: bool = False
 ):
     dev = dev or device()
     model.to(dev)
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-4)
 
     model.train()
     for epoch in range(1, epochs + 1):
         running_loss = 0.0
-        for xb, yb in train_loader:
+        for xb, yb, idx in train_loader:
             xb = xb.to(dev)
             yb = yb.to(dev)
+            idx = idx.to(dev)
 
             optimizer.zero_grad()
-            outputs = model(xb)
+            if BIAS_MODEL:
+                outputs = model(xb, idx)
+            else:
+                outputs = model(xb)
             loss = criterion(outputs, yb)
             loss.backward()
             optimizer.step()
@@ -216,7 +235,7 @@ def train_model(
 
         if epoch % print_every == 0 or epoch == 1 or epoch == epochs:
             avg_loss = running_loss / len(train_loader.dataset)
-            print(f"Epoch {epoch:5d}/{epochs} | Train Loss: {avg_loss:.4f}")
+            if verbose: print(f"Epoch {epoch:5d}/{epochs} | Train Loss: {avg_loss:.4f}")
 
 
 @torch.no_grad()
@@ -231,7 +250,10 @@ def evaluate_loss(
     model.eval()
     X_t = torch.tensor(X, dtype=torch.float32, device=dev)
     Y_t = torch.tensor(Y, dtype=torch.float32, device=dev)
-    outputs = model(X_t)
+    if BIAS_MODEL:
+        outputs = model(X_t, None)  # no bias if no plot indices
+    else:
+        outputs = model(X_t)
     loss = criterion(outputs, Y_t).item()
     return loss
 
@@ -245,7 +267,10 @@ def predict(
     dev = dev or device()
     model.eval()
     X_t = torch.tensor(X, dtype=torch.float32, device=dev)
-    outputs = model(X_t)
+    if BIAS_MODEL:
+        outputs = model(X_t, None)  # no bias if no plot indices
+    else:
+        outputs = model(X_t)
     return outputs.detach().cpu().numpy()
 
 
@@ -261,9 +286,9 @@ def per_species_auc(
             # Handle edge cases where only one class is present in y_true
             auc = roc_auc_score(y_true[sp].values, y_score[:, i])
         except ValueError:
-            print(np.unique(y_true[sp]))
+            # print(np.unique(y_true[sp]))
             auc = np.nan  # not defined if only one class
-        print(f"Species: {sp}, AUC: {auc:.4f}" if not np.isnan(auc) else f"Species: {sp}, AUC: N/A")
+        # print(f"Species: {sp}, AUC: {auc:.4f}" if not np.isnan(auc) else f"Species: {sp}, AUC: N/A")
         scores[sp] = auc
     return scores
 
@@ -276,7 +301,9 @@ def main():
     dev = device()
     print(f"Using device: {dev}")
 
-    regions = ["AWT", "CAN", "NSW", "SWI", "NZ"]
+    # regions = ["AWT", "CAN", "NSW", "SWI", "NZ"]
+
+    regions = ['SWI']
 
     group_regions = {
         "AWT": ["_plant", "_bird"],
@@ -291,6 +318,8 @@ def main():
 
     for region in regions:
 
+        avg_auc_region = []
+
         for group in group_regions[region]:
 
             print(f"\n=== REGION: {region}, GROUP: {group} ===")
@@ -302,6 +331,17 @@ def main():
                 add_po_var=ADD_PO_VAR
             )
 
+            # print head of each
+            # print("\nTraining data sample (X):")
+            # print(X_train.head())
+            # print("\nTraining data sample (Y):")
+            # print(Y_train.head())
+            # print("\nTest data sample (X):")
+            # print(X_test.head())
+            # print("\nTest data sample (Y):")
+            # print(Y_test.head())
+            # exit()
+
             # Scale
             X_train, X_test, scaler = scale_features(X_train, X_test, covs)
 
@@ -312,16 +352,29 @@ def main():
             Y_test_df  = Y_test[species].copy()
 
             # DataLoader
-            train_ds = XYDataset(X_train_np, Y_train_np)
-            train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, drop_last=False)
+            batch_size_consolidated = min(BATCH_SIZE, int(len(X_train_np) * MAX_BATCH_PERCENTAGE))
+            print(f"Using batch size: {batch_size_consolidated} (of {len(X_train_np)} training samples)")
+            plots_idx = np.arange(len(X_train_np))  # dummy plot indices for bias model
+            train_ds = XYDataset(X_train_np, Y_train_np, plots_idx)
+            train_loader = DataLoader(train_ds, batch_size=batch_size_consolidated, shuffle=True, drop_last=False)
 
             # Model / loss
-            model = deepmaxent_model(
-                input_size=len(covs),
-                hidden_size=HIDDEN_SIZE,
-                output_size=len(species),
-                hidden_nbr=HIDDEN_LAYERS
-            )
+            if BIAS_MODEL:
+                num_plots = len(X_train)  # assuming each row is a unique plot
+                model = deepmaxent_model_w_bias(
+                    input_size=len(covs),
+                    hidden_size=HIDDEN_SIZE,
+                    output_size=len(species),
+                    hidden_nbr=HIDDEN_LAYERS,
+                    num_plots=num_plots
+                )
+            else:
+                model = deepmaxent_model(
+                    input_size=len(covs),
+                    hidden_size=HIDDEN_SIZE,
+                    output_size=len(species),
+                    hidden_nbr=HIDDEN_LAYERS
+                )
             criterion = deepmaxent_loss()
 
             # Train
@@ -341,7 +394,7 @@ def main():
                 model=model, X=X_test_np, Y=Y_test_df.values.astype(np.float32),
                 criterion=criterion, dev=dev
             )
-            print(f"\nTest Loss: {test_loss:.4f}")
+            # print(f"\nTest Loss: {test_loss:.4f}")
 
             # Evaluate (AUC per species)
             test_scores = predict(model, X_test_np, dev=dev)
@@ -349,8 +402,18 @@ def main():
 
             avg_auc = np.nanmean(list(aucs.values()))  # ignore NaNs from single-class folds
             print(f"\nAverage AUC (ignoring NaNs): {avg_auc:.4f}")
+            avg_auc_region.append(avg_auc)
 
-            total_aucs.append(avg_auc)
+            # print number of parameters of the model
+            total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+            print(f"Total trainable parameters in model: {total_params}")
+
+        
+        region_avg_auc = np.nanmean(avg_auc_region)
+        total_aucs.append(region_avg_auc)
+        print(f"\n=== **##AVERAGE AUC FOR REGION {region} ACROSS GROUPS: {region_avg_auc:.4f}##** ===")
+
+
 
             # Optional: save artifacts
             # torch.save(model.state_dict(), f"deepmaxent_{REGION}.pt")

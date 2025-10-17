@@ -7,6 +7,8 @@ from time import time
 
 import numpy as np
 import pandas as pd
+import joblib
+import pickle
 
 import torch
 from torch.utils.data import Dataset, DataLoader
@@ -24,8 +26,8 @@ from src.models import deepmaxent_model, deepmaxent_loss, deepmaxent_model_w_bia
 # Config
 # =========================
 REGION = "AWT"                  # "AWT", "CAN", "NSW", "SWI", "NZ"
-ADD_PO_VAR = True               # whether to add the presence-only indicator feature
-ADD_PA_DATA = True              # whether to add half of the PA data to training¿
+ADD_PO_VAR = False               # whether to add the presence-only indicator feature
+ADD_PA_DATA = False              # whether to add half of the PA data to training¿
 GROUP = "_plant"       
 BIAS_MODEL = False            # whether to use the model with per-plot bias
 
@@ -188,13 +190,18 @@ def load_data(region: str, group_filter: str, add_po_var: bool):
 def scale_features(
     X_train: pd.DataFrame,
     X_test: pd.DataFrame,
-    covariates: List[str]
+    covariates: List[str], 
+    output_path: str | None = None
 ) -> Tuple[pd.DataFrame, pd.DataFrame, StandardScaler]:
     scaler = StandardScaler().fit(X_train[covariates])
     X_train_scaled = X_train.copy()
     X_test_scaled = X_test.copy()
     X_train_scaled[covariates] = scaler.transform(X_train[covariates])
     X_test_scaled[covariates] = scaler.transform(X_test[covariates])
+    if output_path:
+        #joblib.dump(scaler, output_path)
+        with open(output_path, 'wb') as f:
+            pickle.dump(scaler, f)
     return X_train_scaled, X_test_scaled, scaler
 
 
@@ -209,7 +216,8 @@ def train_model(
     lr: float = 1e-4,
     print_every: int = 100,
     dev: torch.device | None = None,
-    verbose: bool = False
+    verbose: bool = False,
+    save_model_path: str | None = None
 ):
     dev = dev or device()
     model.to(dev)
@@ -237,6 +245,11 @@ def train_model(
         if epoch % print_every == 0 or epoch == 1 or epoch == epochs:
             avg_loss = running_loss / len(train_loader.dataset)
             if verbose: print(f"Epoch {epoch:5d}/{epochs} | Train Loss: {avg_loss:.4f}")
+    
+    if save_model_path:
+        #torch.save(model.state_dict(), save_model_path)
+        # save the model with everything needed to reload
+        torch.save(model, save_model_path)
 
 
 @torch.no_grad()
@@ -285,6 +298,8 @@ def per_species_auc(
         # auc = roc_auc_score(y_true[sp].values, y_score[:, i])
         try:
             # Handle edge cases where only one class is present in y_true
+            print('Computing AUC for species:', sp)
+            print(y_score[:, i])
             auc = roc_auc_score(y_true[sp].values, y_score[:, i])
         except ValueError:
             # print(np.unique(y_true[sp]))
@@ -305,8 +320,8 @@ def main():
     dev = device()
     print(f"Using device: {dev}")
 
-    regions = ["AWT", "CAN", "NSW", "SA", "SWI", "NZ"]
-
+    # regions = ["AWT", "CAN", "NSW", "SA", "SWI", "NZ"]
+    regions = ["CAN"]
     #regions = ['SWI']
 
     group_regions = {
@@ -317,6 +332,12 @@ def main():
         "SWI": [""],
         "NZ": [""]
     }  
+
+    output_folder = "output"
+    os.makedirs(output_folder, exist_ok=True)
+
+    model_folder = os.path.join(output_folder, "models")
+    os.makedirs(model_folder, exist_ok=True)
 
     total_aucs = []
 
@@ -347,7 +368,9 @@ def main():
             # exit()
 
             # Scale
-            X_train, X_test, scaler = scale_features(X_train, X_test, covs)
+            # scale_output_path = os.path.join(model_folder, f"scaler_{region}{group}.joblib")
+            scale_output_path = os.path.join(model_folder, f"scaler_{region}{group}.pkl")
+            X_train, X_test, scaler = scale_features(X_train, X_test, covs, output_path=scale_output_path)
 
             # arrays
             X_train_np = X_train[covs].values.astype(np.float32)
@@ -382,6 +405,7 @@ def main():
             criterion = deepmaxent_loss()
 
             # Train
+            save_model_path = os.path.join(model_folder, f"deepmaxent_{region}{group}_model.pt")
             train_model(
                 model=model,
                 train_loader=train_loader,
@@ -390,7 +414,8 @@ def main():
                 lr=LR,
                 print_every=PRINT_EVERY,
                 dev=dev,
-                verbose=False
+                verbose=False,
+                save_model_path=save_model_path
             )
 
             # Evaluate (loss)

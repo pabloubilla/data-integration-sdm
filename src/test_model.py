@@ -3,6 +3,7 @@
 import os
 import random
 from typing import List, Tuple, Dict
+from time import time
 
 import numpy as np
 import pandas as pd
@@ -23,8 +24,8 @@ from src.models import deepmaxent_model, deepmaxent_loss, deepmaxent_model_w_bia
 # Config
 # =========================
 REGION = "AWT"                  # "AWT", "CAN", "NSW", "SWI", "NZ"
-ADD_PO_VAR = False               # whether to add the presence-only indicator feature
-ADD_PA_DATA = False              # whether to add half of the PA data to training¿
+ADD_PO_VAR = True               # whether to add the presence-only indicator feature
+ADD_PA_DATA = True              # whether to add half of the PA data to training¿
 GROUP = "_plant"       
 BIAS_MODEL = False            # whether to use the model with per-plot bias
 
@@ -36,7 +37,7 @@ BIAS_MODEL = False            # whether to use the model with per-plot bias
 HIDDEN_SIZE = 250
 HIDDEN_LAYERS = 2
 LR = 1e-4
-EPOCHS = 200              
+EPOCHS = 500              
 BATCH_SIZE = 250
 MAX_BATCH_PERCENTAGE = 1  # max batch size as percentage of training data               
 PRINT_EVERY = 1000
@@ -212,7 +213,7 @@ def train_model(
 ):
     dev = dev or device()
     model.to(dev)
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-4)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=3e-4)
 
     model.train()
     for epoch in range(1, epochs + 1):
@@ -297,19 +298,22 @@ def per_species_auc(
 # Main
 # =========================
 def main():
+
+    start_time = time()
+
     set_all_seeds(SEED)
     dev = device()
     print(f"Using device: {dev}")
 
-    # regions = ["AWT", "CAN", "NSW", "SWI", "NZ"]
+    regions = ["AWT", "CAN", "NSW", "SA", "SWI", "NZ"]
 
-    regions = ['SWI']
+    #regions = ['SWI']
 
     group_regions = {
         "AWT": ["_plant", "_bird"],
         "CAN": [""],
         "NSW": ["_ba", "_db", "_nb", "_ot", "_rt", "_ru", "_sr"],
-
+        "SA" : [""],
         "SWI": [""],
         "NZ": [""]
     }  
@@ -401,17 +405,17 @@ def main():
             aucs = per_species_auc(Y_test_df, test_scores, species)
 
             avg_auc = np.nanmean(list(aucs.values()))  # ignore NaNs from single-class folds
-            print(f"\nAverage AUC (ignoring NaNs): {avg_auc:.4f}")
+            print(f"Average AUC (ignoring NaNs): {avg_auc:.4f}")
             avg_auc_region.append(avg_auc)
 
             # print number of parameters of the model
             total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-            print(f"Total trainable parameters in model: {total_params}")
+            # print(f"Total trainable parameters in model: {total_params}")
 
         
         region_avg_auc = np.nanmean(avg_auc_region)
         total_aucs.append(region_avg_auc)
-        print(f"\n=== **##AVERAGE AUC FOR REGION {region} ACROSS GROUPS: {region_avg_auc:.4f}##** ===")
+        # print(f"\n=== **##AVERAGE AUC FOR REGION {region} ACROSS GROUPS: {region_avg_auc:.4f}##** ===")
 
 
 
@@ -421,6 +425,10 @@ def main():
 
     overall_avg_auc = np.nanmean(total_aucs)
     print(f"\n=== OVERALL AVERAGE AUC ACROSS REGIONS & GROUPS: {overall_avg_auc:.4f} ===")
+
+    end_time = time()
+    elapsed_time = end_time - start_time
+    print(f"\nTotal execution time: {elapsed_time:.2f} seconds")
 
 if __name__ == "__main__":
     main()

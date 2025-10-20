@@ -191,7 +191,8 @@ def scale_features(
     X_train: pd.DataFrame,
     X_test: pd.DataFrame,
     covariates: List[str], 
-    output_path: str | None = None
+    output_path: str | None = None,
+    verbose: bool = True
 ) -> Tuple[pd.DataFrame, pd.DataFrame, StandardScaler]:
     scaler = StandardScaler().fit(X_train[covariates])
     X_train_scaled = X_train.copy()
@@ -202,6 +203,15 @@ def scale_features(
         #joblib.dump(scaler, output_path)
         with open(output_path, 'wb') as f:
             pickle.dump(scaler, f)
+
+    # print X
+    if verbose:
+        print("\nFeature scaling summary:")
+        for col in covariates:
+            print(f"{col}: Train mean={X_train_scaled[col].mean()}, Train std={X_train_scaled[col].std()}, "
+                f"Test mean={X_test_scaled[col].mean()}, Test std={X_test_scaled[col].std()}")
+
+
     return X_train_scaled, X_test_scaled, scaler
 
 

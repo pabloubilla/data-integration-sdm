@@ -25,13 +25,19 @@ from src.models import deepmaxent_model, deepmaxent_loss, deepmaxent_model_w_bia
 # =========================
 # Config
 # =========================
-REGIONS = ["AWT"]             # regions to run
+REGIONS = ["SA"]             # regions to run
 GROUPS_BY_REGION = {
-    "AWT": ["_bird", "_plant"],              # groups to run per region
-}
+        "AWT": ["_plant", "_bird"],
+        "CAN": [""],
+        "NSW": ["_ba", "_db", "_nb", "_ot", "_rt", "_ru", "_sr"],
+        "SA" : [""],
+        "SWI": [""],
+        "NZ": [""]
+    }  
+
 ADD_PO_VAR = True            # if True, add PO indicator covariate (it's like a source indicator)
-BIAS_MODEL = False            # set True if you want per-plot bias
-TEST_PA_FRACTION = 0.5        # PA split: test fraction
+BIAS_MODEL = True            # set True if you want per-plot bias
+TEST_PA_FRACTION = 0.3        # PA split: test fraction
 SEED = 42
 
 # Model / training
@@ -43,12 +49,12 @@ BATCH_SIZE = 250
 MAX_BATCH_PERCENTAGE = 1
 PRINT_EVERY = 1000
 
-RUN_PO = False
-RUN_PA = False
-RUN_POPA = True
+RUN_PO = True
+RUN_PA = True
+RUN_POPA, ADD_INTERACTIONS = True, False
 RUN_DA = False   # domain adversarial training
 RUN_TRANSFER = False
-RUN_TH = True
+RUN_TH = False
 
 # =========================
 # Utils
@@ -65,9 +71,9 @@ def device() -> torch.device:
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 def build_paths(region: str, group_filter: str) -> Tuple[str, str, str]:
-    po_path = os.path.join("data", "processed", "Records", "train_po", f"{region}train_po{group_filter}.csv")
-    pa_path = os.path.join("data", "raw", "Records", "test_pa", f"{region}test_pa{group_filter}.csv")
-    env_path = os.path.join("data", "raw", "Records", "test_env", f"{region}test_env{group_filter}.csv")
+    po_path = os.path.join("data", "processed", "NCEAS", "Records", "train_po", f"{region}train_po{group_filter}.csv")
+    pa_path = os.path.join("data", "raw", "NCEAS", "Records", "test_pa", f"{region}test_pa{group_filter}.csv")
+    env_path = os.path.join("data", "raw", "NCEAS", "Records", "test_env", f"{region}test_env{group_filter}.csv")
     return po_path, pa_path, env_path
 
 class XYDataset(Dataset):
@@ -530,7 +536,7 @@ def run_experiment(
 
 
 
-def domain_probe(X_po: pd.DataFrame, X_pa: pd.DataFrame, covs: list[str]):
+def domain_probe(X_po: pd.DataFrame, X_pa: pd.DataFrame, covs: list[str], verbose: bool = True) -> float:
     """
     Simple diagnostic to test covariate shift between PO and PA.
     Returns domain-AUC (1 = perfectly separable, 0.5 = identical distributions).
@@ -553,8 +559,10 @@ def domain_probe(X_po: pd.DataFrame, X_pa: pd.DataFrame, covs: list[str]):
 
     y_pred = clf.predict_proba(X_test)[:, 1]
     auc = roc_auc_score(y_test, y_pred)
-    print(f"\n[Domain probe] PO vs PA separability AUC = {auc:.3f}")
-    print("≈0.5 → distributions similar | >0.7 → strong covariate shift\n")
+
+    if verbose:
+        print(f"\n[Domain probe] PO vs PA separability AUC = {auc:.3f}")
+        print("≈0.5 → distributions similar | >0.7 → strong covariate shift\n")
     return auc
 
 
@@ -779,9 +787,9 @@ def train_twohead_integration(
             z_po = model.get_features(x_po)
             z_pa = model.get_features(x_pa)
 
-            # logits
+            # logits ## CHECK: This part might make more sense with just one common head
             logit_po = model.po_head(z_po)
-            logit_pa = model.pa_head(z_pa)
+            logit_pa = model.po_head(z_pa)
 
             # probabilities
             y_pred_po = torch.sigmoid(logit_po)
@@ -809,7 +817,7 @@ def train_twohead_integration(
             # default: use symmetric MSE without detach (lets both heads meet in the middle)
             align_loss = mse(logit_pa, model.po_head(z_pa))
 
-            loss = w_pa * loss_pa + w_po * loss_po + w_align * align_loss
+            loss = w_pa * loss_pa + w_po * loss_po  #+ w_align * align_loss
 
             opt.zero_grad()
             loss.backward()
@@ -913,6 +921,10 @@ def main():
         for group in GROUPS_BY_REGION[region]:
             print(f"\n=== REGION: {region}, GROUP: {group or '(all)'} ===")
 
+
+
+
+
             # 1) Load PO & PA, aligned species & covs
             X_po, Y_po, X_pa, Y_pa, species, covs = load_po_pa(
                 region=region,
@@ -926,10 +938,25 @@ def main():
             )
             print(f"PA split → train: {len(X_pa_tr)}, test: {len(X_pa_te)}")
 
-            # 3) Three experiments, same PA_test
             exp_dir = os.path.join(output_root, f"{region}{group}")
 
+            ### test if separable
+            X_po = X_po.drop(columns=["x","y"], errors="ignore")
+            scaler = StandardScaler().fit(X_pa_tr[covs])
+            X_po_s = X_po.copy()
+            X_po_s[covs] = scaler.transform(X_po_s[covs])
+            X_pa_tr_s = X_pa_tr.copy()
+            X_pa_tr_s[covs] = scaler.transform(X_pa_tr_s[covs])
+            # drop PO column if present
+            X_po_s = X_po_s.drop(columns=["PO"], errors="ignore")
+            X_pa_tr_s = X_pa_tr_s.drop(columns=["PO"], errors="ignore")
+            covs_copy = [c for c in covs if c != "PO"]
+            domain_auc = domain_probe(X_po_s, X_pa_tr_s, covs_copy, verbose=True)
+    
+
+
             if RUN_PO:
+                print("\n--- Running PO-only experiment ---")
                 # A) PO-only → PA_test
                 auc_po, aucs_po, model_po, scaler_po = run_experiment(
                     name="PO_only",
@@ -943,6 +970,7 @@ def main():
                 print(f"[PO-only]   Average AUC on PA_test: {auc_po:.4f}")
 
             if RUN_PA:
+                print("\n--- Running PA-only experiment ---")
                 # B) PA_train-only → PA_test
                 auc_pa, aucs_pa, model_pa, scaler_pa = run_experiment(
                     name="PA_only",
@@ -956,31 +984,46 @@ def main():
                 print(f"[PA-only]   Average AUC on PA_test: {auc_pa:.4f}")
 
             if RUN_POPA:
+                # covs for POPA
+                print("\n--- Running PO+PA integration experiment ---")
+                print('The covariates used are:', covs)
+
                 # C) PO + PA_train → PA_test
                 X_mix = pd.concat([X_po.drop(columns=["x","y"], errors="ignore"), X_pa_tr], axis=0, ignore_index=True)
                 Y_mix = pd.concat([Y_po, Y_pa_tr], axis=0, ignore_index=True)
-                auc_mix, aucs_mix, model_mix, scaler_mix = run_experiment(
-                    name="PO_plus_PA",
-                    X_train_df=X_mix,
-                    Y_train_df=Y_mix,
-                    X_test_df=X_pa_te,
-                    Y_test_df=Y_pa_te,
-                    covs=covs, species=species,
-                    output_dir=exp_dir, region=region, group=group
-                )
 
-                
+                if ADD_INTERACTIONS:
+                    # X_expanded (PO interaction with the rest)
+                    non_po_covs = [c for c in covs if c != "PO"]
+                    X_pa_te_copy = X_pa_te.copy()
+                    for c in non_po_covs:
+                        X_mix[f"PO_{c}"] = X_mix["PO"] * X_mix[c]
+                        X_pa_te_copy[f"PO_{c}"] = X_pa_te_copy["PO"] * X_pa_te_copy[c]
+                    total_covs = X_mix.columns.tolist()
+                    print('After adding interactions, the covariates used are:', total_covs)
+                    auc_mix, aucs_mix, model_mix, scaler_mix = run_experiment(
+                        name="PO_plus_PA_interactions",
+                        X_train_df=X_mix,
+                        Y_train_df=Y_mix,
+                        X_test_df=X_pa_te_copy,
+                        Y_test_df=Y_pa_te,
+                        covs=total_covs, species=species,
+                        output_dir=exp_dir, region=region, group=group
+                    )
+                else:
+                    auc_mix, aucs_mix, model_mix, scaler_mix = run_experiment(
+                        name="PO_plus_PA",
+                        X_train_df=X_mix,
+                        Y_train_df=Y_mix,
+                        X_test_df=X_pa_te,
+                        Y_test_df=Y_pa_te,
+                        covs=covs, species=species,
+                        output_dir=exp_dir, region=region, group=group
+                    )
+
+                    
                 print(f"[PO+PA]     Average AUC on PA_test: {auc_mix:.4f}")
 
-            # ### test if separable
-            # X_po = X_po.drop(columns=["x","y"], errors="ignore")
-            # scaler = StandardScaler().fit(X_pa_tr[covs])
-            # X_po_s = X_po.copy()
-            # X_po_s[covs] = scaler.transform(X_po_s[covs])
-            # X_pa_tr_s = X_pa_tr.copy()
-            # X_pa_tr_s[covs] = scaler.transform(X_pa_tr_s[covs])
-            # domain_auc = domain_probe(X_po_s, X_pa_tr_s, covs)
-            # exit()
 
 
 

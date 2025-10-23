@@ -12,9 +12,7 @@ class deepmaxent_loss(nn.Module):
         return loss
 
 
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
+
 
 class deepmaxent_model(nn.Module):
     def __init__(self, input_size: int, hidden_size: int, output_size: int, hidden_nbr: int):
@@ -57,6 +55,7 @@ class deepmaxent_model(nn.Module):
         z = self.get_features(x)
         logits = self.output_layer(z)  # logits; apply sigmoid outside if needed
         return logits
+
 
 
 # class deepmaxent_model(nn.Module):
@@ -197,3 +196,6 @@ class DeepMaxentTwoHead(nn.Module):
             return self.po_head(z)
         else:
             raise ValueError("head must be 'pa' or 'po'")
+        
+
+

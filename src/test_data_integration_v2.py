@@ -18,6 +18,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import roc_auc_score
 from sklearn.linear_model import LogisticRegression
+from sklearn.cluster import KMeans
 
 # --- your models & loss
 from src.models import deepmaxent_model, deepmaxent_loss, deepmaxent_model_w_bias, deepmaxent_domain, grad_reverse, DomainDiscriminator, DeepMaxentTwoHead
@@ -25,7 +26,8 @@ from src.models import deepmaxent_model, deepmaxent_loss, deepmaxent_model_w_bia
 # =========================
 # Config
 # =========================
-REGIONS = ["NZ"]             # regions to run
+# REGIONS = ['SWI']
+REGIONS = ["AWT", "CAN", "NSW", "SA", "SWI", "NZ"]             # regions to run
 GROUPS_BY_REGION = {
         "AWT": ["_plant", "_bird"],
         "CAN": [""],
@@ -35,11 +37,11 @@ GROUPS_BY_REGION = {
         "NZ": [""]
     }  
 # General Experiment settings
-ADD_PO_VAR = True            # if True, add PO indicator covariate (it's like a source indicator)
+ADD_PO_VAR = True            # if True, add PO indicator covariate (it's like a Tsource indicator)
 BIAS_MODEL = False            # set True if you want per-plot bias
 KEEP_XY = True  # if True, keep x,y in covariates
 TEST_PA_FRACTION = 0.3        # PA split: test fraction
-FILTER_PO = True
+# FILTER_PO = True
 
 # Model / training
 HIDDEN_SIZE = 250
@@ -54,7 +56,8 @@ SEED = 42
 RUN_PO = True
 RUN_PA = True
 RUN_POPA, ADD_INTERACTIONS = True, False
-RUN_POPA_WEIGHTED = False
+RUN_FILTER_POPA = True
+RUN_POPA_WEIGHTED = True
 
 
 # =========================
@@ -176,6 +179,46 @@ def split_pa_train_test(X_pa: pd.DataFrame, Y_pa: pd.DataFrame, test_frac: float
         X_pa, Y_pa, test_size=test_frac, random_state=seed
     )
     return X_train, X_test, Y_train, Y_test
+
+def split_pa_train_test_spatially(X_pa, Y_pa, test_frac=0.3, seed=42):
+    """
+    Split presence–absence data into spatially distinct train/test sets.
+    Falls back to random split if no 'x'/'y' columns found.
+    """
+    np.random.seed(seed)
+
+    # --- Spatially aware split ---
+    if {'x', 'y'}.issubset(X_pa.columns):
+        coords = X_pa[['x', 'y']].values
+        coords = (coords - np.mean(coords,axis=0))/np.std(coords,axis=0)
+
+        # Use KMeans to make spatial clusters
+        n_clusters = max(10, int(1 / test_frac))  # adaptive number of clusters
+        kmeans = KMeans(n_clusters=n_clusters, random_state=seed)
+        clusters = kmeans.fit_predict(coords)
+
+        # Randomly select some clusters for testing
+        unique_clusters = np.unique(clusters)
+        n_test = max(1, int(len(unique_clusters) * test_frac))
+        test_clusters = np.random.choice(unique_clusters, n_test, replace=False)
+
+        print(f'Divided the data into {unique_clusters} clusters, {test_clusters} used for testing')
+
+
+        test_mask = np.isin(clusters, test_clusters)
+        train_mask = ~test_mask
+
+        X_tr, X_te = X_pa.iloc[train_mask], X_pa.iloc[test_mask]
+        Y_tr, Y_te = Y_pa.iloc[train_mask], Y_pa.iloc[test_mask]
+    else:
+        # --- Fallback to random split ---
+        X_tr, X_te, Y_tr, Y_te = train_test_split(
+            X_pa, Y_pa, test_size=test_frac, random_state=seed, stratify=Y_pa
+        )
+
+    return X_tr, X_te, Y_tr, Y_te
+
+
 
 def scale_features(
     X_train: pd.DataFrame,
@@ -381,6 +424,8 @@ def run_experiment_popa(
     proportion_pa = len(X_pa_tr_s) / (len(X_po_s) + len(X_pa_tr_s))
     batch_size_po = max(1, int(batch_size * w_po))
     batch_size_pa = max(1, int(batch_size * w_pa))
+    print('Batch for PO: ', batch_size_po)
+    print('Batch for PA: ', batch_size_pa)
     po_ds = XYDataset(X_po_s[covs].values.astype(np.float32), Y_po_df[species].values.astype(np.float32))
     pa_ds = XYDataset(X_pa_tr_s[covs].values.astype(np.float32), Y_pa_tr_df[species].values.astype(np.float32))
     po_loader = DataLoader(po_ds, batch_size=batch_size_po, shuffle=True, drop_last=True)
@@ -401,6 +446,9 @@ def run_experiment_popa(
         model.to(dev)
         optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=3e-4)
 
+        criterion_po = deepmaxent_loss()
+        criterion_pa = deepmaxent_loss()#torch.nn.BCEWithLogitsLoss()
+
         model.train()
         for epoch in range(1, epochs + 1):
             running_loss = 0.0
@@ -418,10 +466,10 @@ def run_experiment_popa(
                 yb_mix = torch.cat([yb_po, yb_pa], dim=0)
                 loss = criterion_species(output_mix, yb_mix)
 
-                # loss_po = criterion_species(outputs_po, yb_po)
-                # loss_pa = criterion_species(outputs_pa, yb_pa)
-                # loss = loss_po + loss_pa
-                #loss = w_po * loss_po + w_pa * loss_pa
+                # loss_po = criterion_po(outputs_po, yb_po)
+                # loss_pa = criterion_pa(outputs_pa, yb_pa)
+                # loss = w_po * loss_po + w_pa * loss_pa
+
                 loss.backward()
                 optimizer.step()
                 running_loss += loss.item() * (xb_po.size(0) + xb_pa.size(0))
@@ -547,7 +595,8 @@ def run_minimal_filter(
 
     if True:
         pred_po = []
-        I_round = 1*(I>0.5)
+        I_round = I.copy()
+        I_round = 1*(I_round>0.5)
         # print(np.mean(I, axis = 0))
         # print(I_round)
         Y_po_np = np.array(Y_po)
@@ -557,9 +606,15 @@ def run_minimal_filter(
             if np.sum(np.abs(Y_po_np[j,args_po] - I_round[j,args_po])) == 0:
                 pred_po.append(j)
                 keep[j] = True
-            if np.sum(args_po) >=2:
+                I[j,args_po] = 1
+            else:
                 keep[j] = True
-                I[j] = Y_po_np[j]
+                I[j,args_po] = 1
+                # I[j,~args_po] = np.mean(Y_po_np[:,~args_po], axis = 0)
+                I[j,~args_po] = np.mean(Y_pa.values[:,~args_po], axis = 0)
+            # if np.sum(args_po) >=2:
+            #     keep[j] = True
+            #     I[j] = Y_po_np[j]
             
 
     if False:
@@ -590,6 +645,80 @@ def run_minimal_filter(
 
 
 
+def po_inputer(
+    X_po: pd.DataFrame, Y_po: pd.DataFrame,
+    X_pa: pd.DataFrame, Y_pa: pd.DataFrame,
+    covs: List[str], species: List[str],
+    *, epochs: int = 50, batch_size: int = 256, lr: float = 1e-3,
+    threshold: float = 0.5, require_all_labels: bool = True,
+    ):
+    """Trains on PA, filters PO by correctness, returns (X_po_keep, Y_po_keep, model, scaler, keep_mask)."""
+
+    # scale (fit on combo PO + PA train)
+    scaler = StandardScaler().fit(
+        pd.concat([X_po[covs], X_pa[covs]], axis=0)
+    )
+    X_po_s = X_po.copy()
+    X_pa_s = X_pa.copy()
+    X_po_s[covs] = scaler.transform(X_po[covs])
+    X_pa_s[covs] = scaler.transform(X_pa[covs])
+
+    train_ds = XYDataset(X_pa_s[covs].values.astype(np.float32), Y_pa[species].values.astype(np.float32))
+    train_loader = DataLoader(train_ds, batch_size=100, shuffle=True, drop_last=False)
+
+    # model
+    model = build_model(input_size=len(covs), output_size=len(species), 
+                        bias=BIAS_MODEL, num_plots=len(X_pa))
+    criterion = 'bce'
+
+    # train
+    print('\n Fitting PA Model for Filtering')
+    train_model(
+        model=model,
+        train_loader=train_loader,
+        criterion=criterion,
+        epochs=EPOCHS,
+        lr=LR,
+        print_every=PRINT_EVERY,
+        dev=device(),
+        verbose=False
+    )
+
+
+    # logits on PO → relative intensities (N x S)
+    I = predict(model, X_po_s[covs].values.astype(np.float32), dev=device()) 
+    I = 1/(1+np.exp(-I))
+    
+    keep = [False]*len(I)
+    if True:
+        pred_po = []
+        I_round = I.copy()
+        I_round = 1*(I_round>0.5)
+        # print(np.mean(I, axis = 0))
+        # print(I_round)
+        Y_po_np = np.array(Y_po)
+        for j in range(len(I)):
+            args_po = Y_po_np[j] == 1
+            # print(np.sum(args_po))
+            if np.sum(np.abs(Y_po_np[j,args_po] - I_round[j,args_po])) == 0:
+                pred_po.append(j)
+                keep[j] = True
+                I[j,args_po] = 1
+            else:
+                keep[j] = True
+                I[j,args_po] = 1
+                # I[j,~args_po] = np.mean(Y_po_np[:,~args_po], axis = 0)
+                I[j,~args_po] = np.mean(Y_pa.values[:,~args_po], axis = 0)
+            # if np.sum(args_po) >=2:
+            #     keep[j] = True
+            #     I[j] = Y_po_np[j]
+            
+
+    print(f'---{np.sum(keep)} PO samples where kept out of {len(X_po)}---')
+
+    # I = (I + Y_po)/2 
+
+    return keep, I, I_round
 
 
 
@@ -622,7 +751,7 @@ def main():
             )
 
             # 2) Split PA → train/test (fixed for all experiments)
-            X_pa_tr, X_pa_te, Y_pa_tr, Y_pa_te = split_pa_train_test(
+            X_pa_tr, X_pa_te, Y_pa_tr, Y_pa_te = split_pa_train_test_spatially(
                 X_pa, Y_pa, test_frac=TEST_PA_FRACTION, seed=SEED
             )
             print(f"PA split → train: {len(X_pa_tr)}, test: {len(X_pa_te)}")
@@ -680,13 +809,33 @@ def main():
                 print(f"[PA-only]   Average AUC on PA_test: {auc_pa:.4f}")
 
             ### Filtering based on PA-PO difference (Done for methods that join PO and PA, so from 3rd on)
-            if FILTER_PO:
-                keep_po, I, I_round = run_minimal_filter(X_po, Y_po, X_pa_tr, Y_pa_tr, covs_copy, species)
-                X_po = X_po.loc[keep_po]
-                Y_po = Y_po.loc[keep_po]
+            if RUN_FILTER_POPA:
+                keep_po, I, I_round = po_inputer(X_po, Y_po, X_pa_tr, Y_pa_tr, covs_copy, species)
+                X_po_filter = X_po.copy().loc[keep_po]
+                Y_po_filter = Y_po.copy().loc[keep_po]
 
-                Y_po[species] = I[keep_po]
+                #Y_po[species] = I_round[keep_po]
+                Y_po_filter[species] = I[keep_po]
                 # X_po['']
+                # covs for POPA
+                print("\n--- Running PO+PA (FILTER) integration experiment ---")
+
+                # C) PO + PA_train → PA_test
+                X_mix = pd.concat([X_po_filter, X_pa_tr], axis=0, ignore_index=True)
+                Y_mix = pd.concat([Y_po_filter, Y_pa_tr], axis=0, ignore_index=True)
+
+                auc_mix_f, aucs_mix_f, model_mix_f, scaler_mix_f = run_experiment(
+                        name="PO_plus_PA_filter",
+                        X_train_df=X_mix,
+                        Y_train_df=Y_mix,
+                        X_test_df=X_pa_te,
+                        Y_test_df=Y_pa_te,
+                        covs=covs, species=species,
+                        output_dir=exp_dir, region=region, group=group,
+                        criterion = 'bce'
+                    )
+                print(f"[PO+PA (FILTER)] Average AUC on PA_test: {auc_mix_f:.4f}")
+
 
             if RUN_POPA:
                 # covs for POPA
@@ -730,7 +879,7 @@ def main():
                         Y_test_df=Y_pa_te,
                         covs=covs, species=species,
                         output_dir=exp_dir, region=region, group=group,
-                        criterion = 'bce'
+                        criterion = 'deepmaxent'
                     )
 
                     
@@ -770,15 +919,17 @@ def main():
                 "region": region,
                 "group": group or "(all)",
                 "TEST_PA_FRACTION": TEST_PA_FRACTION,
-                "AUC_PO_only": float(np.round(auc_po, 6)) if RUN_PO else np.nan,
-                "AUC_PA_only": float(np.round(auc_pa, 6)) if RUN_PA else np.nan,
-                "AUC_PO_plus_PA": float(np.round(auc_mix, 6)) if RUN_POPA else np.nan,
-                "AUC_Weighted_PO_plus_PA": float(np.round(auc_mix_w, 6)) if RUN_POPA_WEIGHTED else np.nan,
+                "AUC_PO_only": float(np.round(auc_po, 4)) if RUN_PO else np.nan,
+                "AUC_PA_only": float(np.round(auc_pa, 4)) if RUN_PA else np.nan,
+                "AUC_PO_plus_PA": float(np.round(auc_mix, 4)) if RUN_POPA else np.nan,
+                "AUC_PO_plus_PA_filter": float(np.round(auc_mix_f, 4)) if RUN_FILTER_POPA else np.nan,
+                "AUC_Weighted_PO_plus_PA": float(np.round(auc_mix_w, 4)) if RUN_POPA_WEIGHTED else np.nan,
             })
 
     summary = pd.DataFrame(summary_rows)
     print("\n=== Summary (Average AUC on shared PA_test) ===")
     print(summary.to_string(index=False))
+    summary.to_csv('output/data_integration_results.csv')
 
     elapsed = time() - start_time
     print(f"\nTotal execution time: {elapsed:.2f} seconds")

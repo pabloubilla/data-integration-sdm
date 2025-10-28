@@ -9,6 +9,9 @@ import numpy as np
 import pandas as pd
 import pickle
 
+from load_data import build_paths_nceas
+from utils import safe_reindex_columns, load_po_pa_nceas, split_pa_train_test_spatially, scale_features
+
 import torch
 from torch.utils.data import Dataset, DataLoader
 import torch.nn as nn
@@ -21,7 +24,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.cluster import KMeans
 
 # --- your models & loss
-from src.models import deepmaxent_model, deepmaxent_loss, deepmaxent_model_w_bias, deepmaxent_domain, grad_reverse, DomainDiscriminator, DeepMaxentTwoHead
+from models import deepmaxent_model, deepmaxent_loss, deepmaxent_model_w_bias, deepmaxent_domain, grad_reverse, DomainDiscriminator, DeepMaxentTwoHead
 
 # =========================
 # Config
@@ -53,11 +56,12 @@ MAX_BATCH_PERCENTAGE = 1
 PRINT_EVERY = 1000
 SEED = 42
 
-RUN_PO = True
-RUN_PA = True
-RUN_POPA, ADD_INTERACTIONS = True, False
-RUN_FILTER_POPA = True
-RUN_POPA_WEIGHTED = True
+RUN_PO = False
+RUN_PA = False
+RUN_POPA, ADD_INTERACTIONS = False, False
+RUN_IMPUTED_POPA = False
+RUN_POPA_ENSAMBLE = True
+RUN_POPA_WEIGHTED = False
 
 
 # =========================
@@ -73,12 +77,6 @@ def set_all_seeds(seed: int = 42) -> None:
 
 def device() -> torch.device:
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-def build_paths(region: str, group_filter: str) -> Tuple[str, str, str]:
-    po_path = os.path.join("data", "processed", "NCEAS", "Records", "train_po", f"{region}train_po{group_filter}.csv")
-    pa_path = os.path.join("data", "raw", "NCEAS", "Records", "test_pa", f"{region}test_pa{group_filter}.csv")
-    env_path = os.path.join("data", "raw", "NCEAS", "Records", "test_env", f"{region}test_env{group_filter}.csv")
-    return po_path, pa_path, env_path
 
 class XYDataset(Dataset):
     def __init__(self, X: np.ndarray, Y: np.ndarray, plot_ids: np.ndarray | None = None):
@@ -96,151 +94,10 @@ class XYDataset(Dataset):
         else:
             return self.X[idx], self.Y[idx], self.plot_ids[idx]
 
-def safe_reindex_columns(df: pd.DataFrame, cols: List[str]) -> pd.DataFrame:
-    missing = [c for c in cols if c not in df.columns]
-    if missing:
-        df = df.copy()
-        for c in missing:
-            df[c] = 0
-    return df[cols]
-
-# =========================
-# Data loading & processing
-# =========================
-def load_po_pa(region: str, group_filter: str, add_po_var: bool, keep_xy: bool = True):
-    """
-    Load PO (aggregated by (x,y)) and PA (full table with covariates & labels),
-    return aligned X/Y for PO and PA, with unified species columns and covariates.
-    """
-    po_path, pa_path, env_path = build_paths(region, group_filter)
-
-    # Presence-only (PO) records
-    df_po = pd.read_csv(po_path)
-
-    # PA labels + environmental covariates
-    df_pa = pd.read_csv(pa_path)
-    df_env = pd.read_csv(env_path)
-
-    # covariates from 5th col onward in env
-    covariates = df_env.columns[4:].tolist()
-
-    # Species 
-    species = sorted(df_po["spid"].unique().tolist()) 
-
-    # --- Build Y_po: pivot to multi-label per (x, y)
-    Y_po = (
-        df_po.pivot_table(index=["x", "y"], columns="spid", aggfunc="size", fill_value=0)
-            .reset_index()
-    )
-    Y_po = safe_reindex_columns(Y_po, ["x", "y"] + species)
-
-    # --- X_po: mean covariates at (x, y)
-    X_po = (
-        df_po.groupby(["x", "y"])[covariates]
-            .mean()
-            .reset_index()
-    )
-    if add_po_var:
-        X_po["PO"] = 1
-
-    # final lists of covariates
-    covs = covariates.copy()
-    if add_po_var and "PO" not in covs:
-        covs.append("PO")
-    if keep_xy:
-        covs = ["x", "y"] + covs
-
-    # --- PA: labels and covariates
-    Y_pa = safe_reindex_columns(df_pa.copy(), species)
-    if add_po_var:
-        df_env["PO"] = 0
-    X_pa = df_env[covs].copy()
-
-
-    # Align PO by (x,y) join
-    XY_po = pd.merge(X_po, Y_po, on=["x", "y"], how="inner")
 
 
 
-    # Split X and Y for PO
-    X_po_final = XY_po[covs].copy()
-    Y_po_final = XY_po[species].copy()
 
-
-    # For PA we already have X_pa, Y_pa aligned to species
-    return X_po_final, Y_po_final, X_pa, Y_pa, species, covs
-
-def split_pa_train_test(X_pa: pd.DataFrame, Y_pa: pd.DataFrame, test_frac: float, seed: int):
-    """
-    Split PA into train/test on rows (locations).
-    We avoid stratification (multi-label strat is non-trivial and dataset-dependent).
-    """
-    X_train, X_test, Y_train, Y_test = train_test_split(
-        X_pa, Y_pa, test_size=test_frac, random_state=seed
-    )
-    return X_train, X_test, Y_train, Y_test
-
-def split_pa_train_test_spatially(X_pa, Y_pa, test_frac=0.3, seed=42):
-    """
-    Split presence–absence data into spatially distinct train/test sets.
-    Falls back to random split if no 'x'/'y' columns found.
-    """
-    np.random.seed(seed)
-
-    # --- Spatially aware split ---
-    if {'x', 'y'}.issubset(X_pa.columns):
-        coords = X_pa[['x', 'y']].values
-        coords = (coords - np.mean(coords,axis=0))/np.std(coords,axis=0)
-
-        # Use KMeans to make spatial clusters
-        n_clusters = max(10, int(1 / test_frac))  # adaptive number of clusters
-        kmeans = KMeans(n_clusters=n_clusters, random_state=seed)
-        clusters = kmeans.fit_predict(coords)
-
-        # Randomly select some clusters for testing
-        unique_clusters = np.unique(clusters)
-        n_test = max(1, int(len(unique_clusters) * test_frac))
-        test_clusters = np.random.choice(unique_clusters, n_test, replace=False)
-
-        print(f'Divided the data into {unique_clusters} clusters, {test_clusters} used for testing')
-
-
-        test_mask = np.isin(clusters, test_clusters)
-        train_mask = ~test_mask
-
-        X_tr, X_te = X_pa.iloc[train_mask], X_pa.iloc[test_mask]
-        Y_tr, Y_te = Y_pa.iloc[train_mask], Y_pa.iloc[test_mask]
-    else:
-        # --- Fallback to random split ---
-        X_tr, X_te, Y_tr, Y_te = train_test_split(
-            X_pa, Y_pa, test_size=test_frac, random_state=seed, stratify=Y_pa
-        )
-
-    return X_tr, X_te, Y_tr, Y_te
-
-
-
-def scale_features(
-    X_train: pd.DataFrame,
-    X_test: pd.DataFrame,
-    covariates: List[str],
-    output_path: str | None = None,
-    verbose: bool = False
-) -> Tuple[pd.DataFrame, pd.DataFrame, StandardScaler]:
-    scaler = StandardScaler().fit(X_train[covariates])
-    X_train_scaled = X_train.copy()
-    X_test_scaled = X_test.copy()
-    X_train_scaled[covariates] = scaler.transform(X_train[covariates])
-    X_test_scaled[covariates] = scaler.transform(X_test[covariates])
-    if output_path:
-        with open(output_path, 'wb') as f:
-            pickle.dump(scaler, f)
-    if verbose:
-        print("\nFeature scaling summary:")
-        for col in covariates:
-            print(f"{col}: Train mean={X_train_scaled[col].mean():.4f}, Train std={X_train_scaled[col].std():.4f}, "
-                  f"Test mean={X_test_scaled[col].mean():.4f}, Test std={X_test_scaled[col].std():.4f}")
-    return X_train_scaled, X_test_scaled, scaler
 
 # =========================
 # Train / Eval helpers
@@ -499,6 +356,163 @@ def run_experiment_popa(
     return avg_auc, aucs, model_path, scaler_path
 
 
+
+def run_experiment_popa_ensamble(
+    name: str,
+    X_po_df: pd.DataFrame, Y_po_df: pd.DataFrame,
+    X_pa_tr_df: pd.DataFrame, Y_pa_tr_df: pd.DataFrame,
+    X_pa_te_df: pd.DataFrame, Y_pa_te_df: pd.DataFrame,
+    covs: List[str], species: List[str],
+    output_dir: str, region: str, group: str,
+    epochs: int = 300, lr: float = 1e-4,
+    batch_size: int = 256, w_po: float = .5, w_pa: float = .5,
+):
+    os.makedirs(output_dir, exist_ok=True)
+    scaler_path = os.path.join(output_dir, f"scaler_{name}_{region}{group}.pkl")
+
+    # ---- scale (fit on combo PO + PA train) ----
+    scaler = StandardScaler().fit(
+        pd.concat([X_po_df[covs], X_pa_tr_df[covs]], axis=0)
+    )
+    X_po_s = X_po_df.copy()
+    X_pa_tr_s = X_pa_tr_df.copy()
+    X_pa_te_s = X_pa_te_df.copy()
+    X_po_s[covs] = scaler.transform(X_po_s[covs])
+    X_pa_tr_s[covs] = scaler.transform(X_pa_tr_s[covs])
+    X_pa_te_s[covs] = scaler.transform(X_pa_te_s[covs])
+
+    # cap batch size by % of PA train size (as in your codebase)
+    batch_size_po = min(batch_size, int(len(X_po_s) * MAX_BATCH_PERCENTAGE))
+    batch_size_pa = min(batch_size, int(len(X_pa_tr_s) * MAX_BATCH_PERCENTAGE))
+
+    # ---- data loaders (PO and PA task-specific) ----
+    batch_size_po = max(1, int(batch_size * w_po))
+    batch_size_pa = max(1, int(batch_size_pa * w_pa))
+    print('Batch for PO: ', batch_size_po)
+    print('Batch for PA: ', batch_size_pa)
+
+    po_ds = XYDataset(
+        X_po_s[covs].values.astype(np.float32),
+        Y_po_df[species].values.astype(np.float32)
+    )
+    pa_ds = XYDataset(
+        X_pa_tr_s[covs].values.astype(np.float32),
+        Y_pa_tr_df[species].values.astype(np.float32)
+    )
+    po_loader = DataLoader(po_ds, batch_size=batch_size_po, shuffle=True, drop_last=True)
+    pa_loader = DataLoader(pa_ds, batch_size=batch_size_pa, shuffle=True, drop_last=True)
+
+    # ---- model for PA (multi-label BCE) ----
+    model_pa = deepmaxent_model(
+        input_size=len(covs), hidden_size=HIDDEN_SIZE,
+        output_size=len(species), hidden_nbr=HIDDEN_LAYERS
+    )
+    train_model(
+        model=model_pa,
+        train_loader=pa_loader,
+        criterion='bce',
+        epochs=epochs,
+        lr=lr,
+        print_every=PRINT_EVERY,
+        dev=device(),
+        verbose=False
+    )
+
+    # ---- model for PO (DeepMaxEnt loss) ----
+    model_po = deepmaxent_model(
+        input_size=len(covs), hidden_size=HIDDEN_SIZE,
+        output_size=len(species), hidden_nbr=HIDDEN_LAYERS
+    )
+    train_model(
+        model=model_po,
+        train_loader=po_loader,
+        criterion='deepmaxent',
+        epochs=epochs,
+        lr=lr,
+        print_every=PRINT_EVERY,
+        dev=device(),
+        verbose=False
+    )
+
+    # ---- third model: discriminator PO vs PA (binary) ----
+    # build combined train set: PO labeled 0, PA labeled 1
+    X_disc_tr = np.vstack([
+        X_po_s[covs].values.astype(np.float32),
+        X_pa_tr_s[covs].values.astype(np.float32)
+    ])
+    y_disc_tr = np.concatenate([
+        np.zeros(len(X_po_s), dtype=np.float32),
+        np.ones(len(X_pa_tr_s), dtype=np.float32)
+    ])[:, None]  # shape (N,1) for BCE
+
+    disc_ds = XYDataset(X_disc_tr, y_disc_tr)
+    # keep batch roughly aligned with base batch_size
+    disc_loader = DataLoader(disc_ds, batch_size=max(32, batch_size), shuffle=True, drop_last=True)
+
+    model_disc = deepmaxent_model(
+        input_size=len(covs), hidden_size=HIDDEN_SIZE,
+        output_size=1, hidden_nbr=HIDDEN_LAYERS
+    )
+    train_model(
+        model=model_disc,
+        train_loader=disc_loader,
+        criterion='bce',            # binary cross-entropy
+        epochs=epochs,
+        lr=lr,
+        print_every=PRINT_EVERY,
+        dev=device(),
+        verbose=False
+    )
+
+    # ---- evaluate on PA_test with weighted ensemble ----
+    X_te_np = X_pa_te_s[covs].values.astype(np.float32)
+
+ 
+    # raw logits
+    logits_pa = predict(model_pa, X_te_np, dev=device())
+    logits_po = predict(model_po, X_te_np, dev=device())
+    logits_disc = predict(model_disc, X_te_np, dev=device())
+
+    # ---- normalization ----
+    # PA + PO: row-wise softmax or normalize by sum
+    exp_pa = np.exp(logits_pa - np.max(logits_pa, axis=1, keepdims=True))
+    scores_pa = exp_pa / np.clip(exp_pa.sum(axis=1, keepdims=True), 1e-8, None)
+
+    exp_po = np.exp(logits_po - np.max(logits_po, axis=1, keepdims=True))
+    scores_po = exp_po / np.clip(exp_po.sum(axis=1, keepdims=True), 1e-8, None)
+
+    # discriminator: sigmoid for probability
+    p_is_pa = 1 / (1 + np.exp(-logits_disc))
+    if p_is_pa.ndim == 2 and p_is_pa.shape[1] == 1:
+        p_is_pa = p_is_pa.reshape(-1, 1)
+
+    # ---- weighted ensemble ----
+    scores_ens = p_is_pa * scores_pa + (1.0 - p_is_pa) * scores_po
+
+    # AUCs on PA test
+    aucs = per_species_auc(Y_pa_te_df[species], scores_ens, species)
+    avg_auc = np.nanmean(list(aucs.values()))
+
+    # ---- save artifacts ----
+    scaler_path = os.path.join(output_dir, f"scaler_{name}_{region}{group}.pkl")
+    with open(scaler_path, "wb") as f:
+        pickle.dump(scaler, f)
+
+    model_dir = os.path.join(output_dir, f"deepmaxent_DA_{region}{group}")
+    os.makedirs(model_dir, exist_ok=True)
+    model_pa_path = os.path.join(model_dir, "model_pa.pt")
+    model_po_path = os.path.join(model_dir, "model_po.pt")
+    model_disc_path = os.path.join(model_dir, "model_disc.pt")
+    torch.save(model_pa, model_pa_path)
+    torch.save(model_po, model_po_path)
+    torch.save(model_disc, model_disc_path)
+
+    # For backward compatibility keep a single path; point it to the directory
+    model_path = model_dir
+
+    return avg_auc, aucs, model_path, scaler_path
+
+
 def domain_probe(X_po: pd.DataFrame, X_pa: pd.DataFrame, covs: list[str], verbose: bool = True) -> float:
     """
     Simple diagnostic to test covariate shift between PO and PA.
@@ -744,7 +758,7 @@ def main():
             
 
             # 1) Load PO & PA, aligned species & covs
-            X_po, Y_po, X_pa, Y_pa, species, covs = load_po_pa(
+            X_po, Y_po, X_pa, Y_pa, species, covs = load_po_pa_nceas(
                 region=region,
                 group_filter=group,
                 add_po_var=ADD_PO_VAR
@@ -809,23 +823,23 @@ def main():
                 print(f"[PA-only]   Average AUC on PA_test: {auc_pa:.4f}")
 
             ### Filtering based on PA-PO difference (Done for methods that join PO and PA, so from 3rd on)
-            if RUN_FILTER_POPA:
+            if RUN_IMPUTED_POPA:
                 keep_po, I, I_round = po_inputer(X_po, Y_po, X_pa_tr, Y_pa_tr, covs_copy, species)
-                X_po_filter = X_po.copy().loc[keep_po]
-                Y_po_filter = Y_po.copy().loc[keep_po]
+                X_po_imputed = X_po.copy().loc[keep_po]
+                Y_po_imputed = Y_po.copy().loc[keep_po]
 
                 #Y_po[species] = I_round[keep_po]
-                Y_po_filter[species] = I[keep_po]
+                Y_po_imputed[species] = I[keep_po]
                 # X_po['']
                 # covs for POPA
-                print("\n--- Running PO+PA (FILTER) integration experiment ---")
+                print("\n--- Running PO+PA (IMPUTED) integration experiment ---")
 
                 # C) PO + PA_train → PA_test
-                X_mix = pd.concat([X_po_filter, X_pa_tr], axis=0, ignore_index=True)
-                Y_mix = pd.concat([Y_po_filter, Y_pa_tr], axis=0, ignore_index=True)
+                X_mix = pd.concat([X_po_imputed, X_pa_tr], axis=0, ignore_index=True)
+                Y_mix = pd.concat([Y_po_imputed, Y_pa_tr], axis=0, ignore_index=True)
 
-                auc_mix_f, aucs_mix_f, model_mix_f, scaler_mix_f = run_experiment(
-                        name="PO_plus_PA_filter",
+                auc_mix_imp, aucs_mix_imp, model_mix_imp, scaler_mix_imp = run_experiment(
+                        name="PO_plus_PA_imputed",
                         X_train_df=X_mix,
                         Y_train_df=Y_mix,
                         X_test_df=X_pa_te,
@@ -834,8 +848,31 @@ def main():
                         output_dir=exp_dir, region=region, group=group,
                         criterion = 'bce'
                     )
-                print(f"[PO+PA (FILTER)] Average AUC on PA_test: {auc_mix_f:.4f}")
+                print(f"[PO+PA (IMPUTED)] Average AUC on PA_test: {auc_mix_imp:.4f}")
 
+
+            if RUN_POPA_ENSAMBLE:
+                
+                print("\n--- Running PO+PA (ENSAMBLE) integration experiment ---")
+                auc_mix_e, aucs_mix_e, model_mix_e, scaler_mix_e = run_experiment_popa_ensamble(
+                    name="PO_plus_PA_Ensamble",
+                    X_po_df=X_po,
+                    Y_po_df=Y_po,
+                    X_pa_tr_df=X_pa_tr,
+                    Y_pa_tr_df=Y_pa_tr,
+                    X_pa_te_df=X_pa_te,
+                    Y_pa_te_df=Y_pa_te,
+                    covs=covs, species=species,
+                    output_dir=exp_dir, region=region, group=group,
+                    epochs=EPOCHS,
+                    lr=LR,
+                    batch_size=BATCH_SIZE,
+                    w_po=.5,
+                    w_pa=.5
+                )
+                print(f"[Ensamble PO+PA]     Average AUC on PA_test: {auc_mix_e:.4f}")
+
+                
 
             if RUN_POPA:
                 # covs for POPA
@@ -922,7 +959,8 @@ def main():
                 "AUC_PO_only": float(np.round(auc_po, 4)) if RUN_PO else np.nan,
                 "AUC_PA_only": float(np.round(auc_pa, 4)) if RUN_PA else np.nan,
                 "AUC_PO_plus_PA": float(np.round(auc_mix, 4)) if RUN_POPA else np.nan,
-                "AUC_PO_plus_PA_filter": float(np.round(auc_mix_f, 4)) if RUN_FILTER_POPA else np.nan,
+                "AUC_PO_plus_PA_imputed": float(np.round(auc_mix_imp, 4)) if RUN_IMPUTED_POPA else np.nan,
+                "AUC_PO_plus_PA_ensamble": float(np.round(auc_mix_e, 4)) if RUN_POPA_ENSAMBLE else np.nan,
                 "AUC_Weighted_PO_plus_PA": float(np.round(auc_mix_w, 4)) if RUN_POPA_WEIGHTED else np.nan,
             })
 

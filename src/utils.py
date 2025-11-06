@@ -8,6 +8,38 @@ import pickle
 
 
 
+def split_pa_train_test_kmeans(X_pa, Y_pa, covs, test_frac=0.3, seed=42):
+    """
+    Split presence–absence data into spatially distinct train/test sets.
+    Falls back to random split if no 'x'/'y' columns found.
+    """
+    np.random.seed(seed)
+
+    X = X_pa[covs].values 
+
+    # Use KMeans to make spatial clusters
+    n_clusters = max(10, int(1 / test_frac))  # adaptive number of clusters
+    kmeans = KMeans(n_clusters=n_clusters, random_state=seed)
+    clusters = kmeans.fit_predict(X)
+
+    # Randomly select some clusters for testing
+    unique_clusters = np.unique(clusters)
+    n_test = max(1, int(len(unique_clusters) * test_frac))
+    test_clusters = np.random.choice(unique_clusters, n_test, replace=False)
+
+    print(f'Divided the data into {unique_clusters} clusters, {test_clusters} used for testing')
+
+
+    test_mask = np.isin(clusters, test_clusters)
+    train_mask = ~test_mask
+
+    X_tr, X_te = X_pa.iloc[train_mask], X_pa.iloc[test_mask]
+    Y_tr, Y_te = Y_pa.iloc[train_mask], Y_pa.iloc[test_mask]
+
+
+    return X_tr, X_te, Y_tr, Y_te
+
+
 def split_pa_train_test_spatially(X_pa, Y_pa, test_frac=0.3, seed=42):
     """
     Split presence–absence data into spatially distinct train/test sets.

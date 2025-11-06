@@ -1,7 +1,8 @@
 import os
 from typing import List, Tuple, Dict
 import pandas as pd
-from utils import safe_reindex_columns
+from src.utils import safe_reindex_columns
+import numpy as np
 
 def build_paths_nceas(region: str, group_filter: str) -> Tuple[str, str, str]:
     po_path = os.path.join("data", "processed", "NCEAS", "Records", "train_po", f"{region}train_po{group_filter}.csv")
@@ -35,6 +36,15 @@ def load_po_pa_nceas(region: str, group_filter: str, add_po_var: bool, keep_xy: 
             .reset_index()
     )
     Y_po = safe_reindex_columns(Y_po, ["x", "y"] + species)
+    
+    
+    Y_po_sid = (
+        df_po.pivot_table(index=['siteid'], columns="spid", aggfunc="size", fill_value=0)
+            .reset_index()
+    )
+    Y_po_sid = safe_reindex_columns(Y_po_sid, ["siteid"] + species)
+
+
 
     # --- X_po: mean covariates at (x, y)
     X_po = (
@@ -59,15 +69,21 @@ def load_po_pa_nceas(region: str, group_filter: str, add_po_var: bool, keep_xy: 
     X_pa = df_env[covs].copy()
 
 
+
     # Align PO by (x,y) join
     XY_po = pd.merge(X_po, Y_po, on=["x", "y"], how="inner")
-
 
 
     # Split X and Y for PO
     X_po_final = XY_po[covs].copy()
     Y_po_final = XY_po[species].copy()
 
+
+    ### TODO: Change filter to explode
+    Y_po_final[species] = np.clip(Y_po_final[species], 0, 1)
+    Y_pa[species] = np.clip(Y_pa[species], 0, 1)
+    print('Values clipped to 0,1')
+    print(np.unique(Y_pa[species].values),np.unique(Y_po_final[species].values))
 
     # For PA we already have X_pa, Y_pa aligned to species
     return X_po_final, Y_po_final, X_pa, Y_pa, species, covs

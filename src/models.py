@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.autograd import Function
+import numpy as np
 
 
 class deepmaxent_loss(nn.Module):
@@ -58,6 +59,66 @@ class deepmaxent_model(nn.Module):
 
 
 
+
+class MLP(nn.Module):
+    def __init__(self, in_dim, out_dim, hidden=(128, 64), dropout=0.0):
+        super().__init__()
+        layers = []
+        d = in_dim
+        for h in hidden:
+            layers += [nn.Linear(d, h), nn.ReLU(), nn.Dropout(dropout)]
+            d = h
+        layers += [nn.Linear(d, out_dim)]
+        self.net = nn.Sequential(*layers)
+
+    def forward(self, x):
+        return self.net(x)
+
+
+class SDMWithBias(nn.Module):
+    """    species_head: B x C -> B x K
+    bias_head:    B x D -> B x 1
+    Combines them to produce lambda: B x K
+    """
+    def __init__(self, n_covariates, n_species, n_bias_covariates,
+                 hidden_species=(128,64), hidden_bias=(64,), link="logadd"):
+        super().__init__()
+        self.species_head = MLP(n_covariates, n_species, hidden_species)
+        self.bias_head    = MLP(n_bias_covariates, 1, hidden_bias)
+        assert link in {"logadd","multiply"}
+        self.link = link
+
+        # Optional learnable global intercept per species
+        # self.species_intercept = nn.Parameter(torch.zeros(1, n_species))
+
+    def forward(self, X, Z):
+        S = self.species_head(X) #+ self.species_intercept  # B x K
+        b = self.bias_head(Z) 
+        
+        return S, b                              # B x 1
+
+        if self.link == "logadd":
+            # λ = exp(S + b), broadcasting b over species dimension
+            log_lambda = S + b
+            lam = torch.exp(log_lambda)
+            return lam, log_lambda
+        else:
+            # λ = softplus(S) * softplus(b)
+            lam = F.softplus(S) * F.softplus(b)            # broadcast
+            # define a pseudo log for convenience (not used in multiply mode)
+            log_lambda = torch.log(lam + 1e-8)
+            return lam, log_lambda
+
+class deepmaxent_loss_bias(nn.Module):
+    def __init__(self):
+        super(deepmaxent_loss_bias, self).__init__()
+    def forward(self, input1, input2, target):
+        loss = -((target)*(input1.log_softmax(0)+input2.log_softmax(0))).mean(0).mean()
+        # loss = -((target)*(input1.softmax(0)*input2.softmax(0)).log()).mean(0).mean()
+        return loss
+
+
+
 # class deepmaxent_model(nn.Module):
 #     def __init__(self, input_size, hidden_size, output_size,hidden_nbr):
 #         super(deepmaxent_model, self).__init__()
@@ -83,7 +144,8 @@ class deepmaxent_model(nn.Module):
 
 ### Version with per-plot bias ###
 class deepmaxent_model_w_bias(nn.Module):
-    def __init__(self, input_size, hidden_size, output_size, hidden_nbr, num_plots):
+    def __init__(self, input_size, hidden_size, output_size, hidden_nbr, num_plots,
+                 separate = True):
         super().__init__()
         self.fc1_lambda = nn.Linear(input_size, hidden_size)
         self.hidden_layers_lambda = nn.ModuleList(
@@ -94,7 +156,9 @@ class deepmaxent_model_w_bias(nn.Module):
 
         # one learnable scalar per plot (shared across all Y)
         self.plot_bias = nn.Embedding(num_plots, 1)
-        nn.init.zeros_(self.plot_bias.weight)  # start with no offset
+        nn.init.zeros_(self.plot_bias.weight)  
+
+        self.separate = separate
 
     def forward(self, xinput, plot_idx):
         """
@@ -107,10 +171,15 @@ class deepmaxent_model_w_bias(nn.Module):
         logits = self.fc3_lambda(x)                     # [batch, output_size]
         if plot_idx is None:
             return logits  # no bias if no indices provided
+        b = self.plot_bias(plot_idx)# .squeeze(-1)        # [batch]
 
-        b = self.plot_bias(plot_idx).squeeze(-1)        # [batch]
-        logits = logits + b.unsqueeze(1)                # broadcast to [batch, output_size]
+        if self.separate:
+            return logits, b
+
+        logits = logits + b# .unsqueeze(1)                # broadcast to [batch, output_size]
         return logits
+    
+
     
 
 

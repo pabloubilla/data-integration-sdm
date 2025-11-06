@@ -1,5 +1,7 @@
 # Just keeps the relevant 3 methods which so far make more sense, discarding the rest (still in test_data_integration.py)
 
+## Weights and Biases
+
 import os
 import random
 from typing import List, Tuple, Dict
@@ -9,8 +11,8 @@ import numpy as np
 import pandas as pd
 import pickle
 
-from load_data import build_paths_nceas
-from utils import safe_reindex_columns, load_po_pa_nceas, split_pa_train_test_spatially, scale_features
+from src.load_data import build_paths_nceas, load_po_pa_nceas
+from src.utils import safe_reindex_columns, split_pa_train_test_spatially, scale_features
 
 import torch
 from torch.utils.data import Dataset, DataLoader
@@ -24,7 +26,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.cluster import KMeans
 
 # --- your models & loss
-from models import deepmaxent_model, deepmaxent_loss, deepmaxent_model_w_bias, deepmaxent_domain, grad_reverse, DomainDiscriminator, DeepMaxentTwoHead
+from src.models import deepmaxent_model, deepmaxent_loss, deepmaxent_model_w_bias, deepmaxent_domain, grad_reverse, DomainDiscriminator, DeepMaxentTwoHead, SDMWithBias, deepmaxent_loss_bias
 
 # =========================
 # Config
@@ -41,26 +43,28 @@ GROUPS_BY_REGION = {
     }  
 # General Experiment settings
 ADD_PO_VAR = True            # if True, add PO indicator covariate (it's like a Tsource indicator)
-BIAS_MODEL = False            # set True if you want per-plot bias
+BIAS_MODEL = False            # set True for per-plot bias
 KEEP_XY = True  # if True, keep x,y in covariates
-TEST_PA_FRACTION = 0.3        # PA split: test fraction
+TEST_PA_FRACTION = 0.99        # PA split: test fraction
 # FILTER_PO = True
 
 # Model / training
 HIDDEN_SIZE = 250
+# HIDDEN_BIAS_SIZE = 3000
 HIDDEN_LAYERS = 2
 LR = 1e-4
-EPOCHS = 500
+EPOCHS = 250
 BATCH_SIZE = 250
 MAX_BATCH_PERCENTAGE = 1
 PRINT_EVERY = 1000
 SEED = 42
 
-RUN_PO = False
+RUN_PO = True
+RUN_PO_W_BIAS = True
 RUN_PA = False
 RUN_POPA, ADD_INTERACTIONS = False, False
 RUN_IMPUTED_POPA = False
-RUN_POPA_ENSAMBLE = True
+RUN_POPA_ENSEMBLE = False
 RUN_POPA_WEIGHTED = False
 
 
@@ -95,6 +99,28 @@ class XYDataset(Dataset):
             return self.X[idx], self.Y[idx], self.plot_ids[idx]
 
 
+class XZYDataset(Dataset):
+    def __init__(
+        self,
+        X_species: np.ndarray,     # (N, Cx)
+        Z_bias: np.ndarray,        # (N, Cz)
+        Y: np.ndarray,             # (N, K)
+        # mask: np.ndarray | None = None  # (N, K) boolean or 0/1 for missing labels
+    ):
+        assert len(X_species) == len(Z_bias) == len(Y)
+        self.Xs = torch.tensor(X_species, dtype=torch.float32)
+        self.Zb = torch.tensor(Z_bias, dtype=torch.float32)
+        self.Y  = torch.tensor(Y, dtype=torch.float32)
+        # self.mask = None if mask is None else torch.tensor(mask.astype(bool))
+
+    def __len__(self) -> int:
+        return self.Xs.shape[0]
+
+    def __getitem__(self, idx: int):
+        # if self.mask is None:
+        #     return self.Xs[idx], self.Zb[idx], self.Y[idx]#, None
+        # else:
+        return self.Xs[idx], self.Zb[idx], self.Y[idx]#, self.mask[idx]
 
 
 
@@ -161,9 +187,121 @@ def train_model(
             avg_loss = running_loss / len(train_loader.dataset)
             print(f"Epoch {epoch:5d}/{epochs} | Train Loss: {avg_loss:.4f}")
 
+    if BIAS_MODEL:
+        print(model.plot_bias(idx))
+
+
+def run_experiment_bias(
+    name: str,
+    X_train_df: pd.DataFrame, Y_train_df: pd.DataFrame,
+    X_test_df: pd.DataFrame,  Y_test_df: pd.DataFrame,
+    covs_species: List[str], covs_bias: List[str], species: List[str],
+    output_dir: str, region: str, group: str,
+    criterion: str = "bce_from_lambda",   # or "poisson"
+    link: str = "logadd",
+    verbose: bool = False
+):
+    os.makedirs(output_dir, exist_ok=True)
+    # Independent scalers for the two inputs (you can share if desired)
+    scaler_sp_path = os.path.join(output_dir, f"scaler_species_{name}_{region}{group}.pkl")
+    scaler_bi_path = os.path.join(output_dir, f"scaler_bias_{name}_{region}{group}.pkl")
+
+    # scale species covariates
+    Xtr_sp, Xte_sp, _ = scale_features(
+        X_train_df, X_test_df, covs_species, output_path=scaler_sp_path, verbose=False
+    )
+    # scale bias covariates
+    Xtr_bi, Xte_bi, _ = scale_features(
+        X_train_df, X_test_df, covs_bias, output_path=scaler_bi_path, verbose=False
+    )
+
+    Xs_tr = Xtr_sp[covs_species].values.astype(np.float32)
+    Zb_tr = Xtr_bi[covs_bias].values.astype(np.float32)
+    Y_tr  = Y_train_df[species].values.astype(np.float32)
+
+    Xs_te = Xte_sp[covs_species].values.astype(np.float32)
+    Zb_te = Xte_bi[covs_bias].values.astype(np.float32)
+    Y_te  = Y_test_df[species].copy()
+
+    train_ds = XZYDataset(Xs_tr, Zb_tr, Y_tr)
+    train_loader = DataLoader(train_ds, batch_size=max(1, min(BATCH_SIZE, int(len(Xs_tr) * MAX_BATCH_PERCENTAGE))),
+                              shuffle=True, drop_last=False)
+
+    model = SDMWithBias(len(covs_species), len(species), len(covs_bias), 
+                        hidden_species = (500,500), hidden_bias = (1000,500))
+
+    train_bias_model(
+        model=model,
+        loader=train_loader,
+        criterion=criterion,
+        epochs=EPOCHS,
+        lr=LR,
+        print_every=PRINT_EVERY,
+        dev=device(),
+        verbose=verbose,
+    )
+    # print('Finished model training')
+
+    # # Evaluate
+    # if criterion == "bce_from_lambda":
+    #     scores = predict_twohead_presence_prob(model, Xs_te, Zb_te, dev=device())
+    # else:  # "poisson"
+    #     scores = predict_twohead_lambda(model, Xs_te, Zb_te, dev=device())
+    Xs_te = torch.tensor(Xs_te, dtype=torch.float32, device=device())
+    Zb_te = torch.tensor(Zb_te, dtype=torch.float32, device=device())
+    scores, _ = model(Xs_te, Zb_te)
+    scores = scores.detach().cpu().numpy()
+
+    aucs = per_species_auc(Y_te, scores, species)
+    avg_auc = np.nanmean(list(aucs.values()))
+
+    # Save
+    model_path = os.path.join(output_dir, f"twohead_{name}_{region}{group}.pt")
+    torch.save(model, model_path)
+
+    return avg_auc, aucs, model_path, (scaler_sp_path, scaler_bi_path)
 
 
 
+
+def train_bias_model(
+    model: nn.Module,
+    loader: DataLoader,
+    criterion: str = "poisson",       # "poisson" or "bce_from_lambda"
+    epochs: int = 200,
+    lr: float = 1e-3,
+    print_every: int = 1000,
+    dev: torch.device | None = None,
+    verbose: bool = False
+):
+    dev = dev or device()
+    model.to(dev)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=3e-4)
+
+    loss_f = deepmaxent_loss_bias()
+
+    model.train()
+    for epoch in range(1, epochs + 1):
+        running = 0.0
+        nobs = 0
+        for Xs, Zb, Yb in loader:
+            Xs = Xs.to(dev); Zb = Zb.to(dev); Yb = Yb.to(dev)
+            # M = None if M is None else M.to(dev)
+
+            optimizer.zero_grad()
+            S, bias = model(Xs, Zb)           # (B, K), (B, K)
+            loss = loss_f(S, bias, Yb)
+
+            loss.backward()
+            # nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0) # what is this
+            optimizer.step()
+
+            bs = Xs.size(0)
+            running += loss.item() * bs
+            nobs += bs
+
+        if verbose and (epoch % print_every == 0 or epoch == 1 or epoch == epochs):
+            print(f"Epoch {epoch:5d}/{epochs} | Train Loss: {running / max(nobs,1):.4f}")
 
 
 @torch.no_grad()
@@ -357,7 +495,7 @@ def run_experiment_popa(
 
 
 
-def run_experiment_popa_ensamble(
+def run_experiment_popa_ensemble(
     name: str,
     X_po_df: pd.DataFrame, Y_po_df: pd.DataFrame,
     X_pa_tr_df: pd.DataFrame, Y_pa_tr_df: pd.DataFrame,
@@ -477,6 +615,7 @@ def run_experiment_popa_ensamble(
     # PA + PO: row-wise softmax or normalize by sum
     exp_pa = np.exp(logits_pa - np.max(logits_pa, axis=1, keepdims=True))
     scores_pa = exp_pa / np.clip(exp_pa.sum(axis=1, keepdims=True), 1e-8, None)
+    sum_sites_pa = np.sum(scores_pa, axis = 1)
 
     exp_po = np.exp(logits_po - np.max(logits_po, axis=1, keepdims=True))
     scores_po = exp_po / np.clip(exp_po.sum(axis=1, keepdims=True), 1e-8, None)
@@ -488,6 +627,15 @@ def run_experiment_popa_ensamble(
 
     # ---- weighted ensemble ----
     scores_ens = p_is_pa * scores_pa + (1.0 - p_is_pa) * scores_po
+
+    # ---- debug print ----    
+    # for i in range(scores_ens.shape[0]):
+    #     print(f"\nSpecies {i}:")
+    #     print(f"  p_is_pa = {p_is_pa[i].item():.3f}")
+    #     print(f"  scores_pa = {np.round(scores_pa[i], 3)}")
+    #     print(f"  scores_po = {np.round(scores_po[i], 3)}")
+    #     print(f"  -> scores_ens = {np.round(scores_ens[i], 3)}")
+
 
     # AUCs on PA test
     aucs = per_species_auc(Y_pa_te_df[species], scores_ens, species)
@@ -782,7 +930,7 @@ def main():
             # drop PO column if present
             X_po_s = X_po_s.drop(columns=["PO"], errors="ignore")
             X_pa_tr_s = X_pa_tr_s.drop(columns=["PO"], errors="ignore")
-            covs_copy = [c for c in covs if c != "PO"]
+            covs_no_po = [c for c in covs if c != "PO"]
             # domain_auc = domain_probe(X_po_s, X_pa_tr_s, covs_copy, verbose=True)
 
            
@@ -805,6 +953,24 @@ def main():
                 )
                 print(f"[PO-only]   Average AUC on PA_test: {auc_po:.4f}")
 
+            if RUN_PO_W_BIAS:
+                print("\n--- Running PO-only (with BIAS) experiment ---")
+                # A) PO-only → PA_test
+     
+                auc_po_bias, _, _, _ = run_experiment_bias(
+                    name="PO_only",
+                    X_train_df=X_po,
+                    Y_train_df=Y_po,
+                    X_test_df=X_pa_te,  # evaluate on PA_test covs
+                    Y_test_df=Y_pa_te,  # evaluate on PA_test labels
+                    covs_species=covs, 
+                    covs_bias=['x', 'y'],
+                    species=species,
+                    output_dir=exp_dir, region=region, group=group,
+                    criterion = ''
+                )
+                print(f"[PO-only]   Average AUC on PA_test: {auc_po_bias:.4f}")
+
             if RUN_PA:
                 print("\n--- Running PA-only experiment ---")
                 
@@ -824,7 +990,7 @@ def main():
 
             ### Filtering based on PA-PO difference (Done for methods that join PO and PA, so from 3rd on)
             if RUN_IMPUTED_POPA:
-                keep_po, I, I_round = po_inputer(X_po, Y_po, X_pa_tr, Y_pa_tr, covs_copy, species)
+                keep_po, I, I_round = po_inputer(X_po, Y_po, X_pa_tr, Y_pa_tr, covs_no_po, species)
                 X_po_imputed = X_po.copy().loc[keep_po]
                 Y_po_imputed = Y_po.copy().loc[keep_po]
 
@@ -851,18 +1017,18 @@ def main():
                 print(f"[PO+PA (IMPUTED)] Average AUC on PA_test: {auc_mix_imp:.4f}")
 
 
-            if RUN_POPA_ENSAMBLE:
+            if RUN_POPA_ENSEMBLE:
                 
-                print("\n--- Running PO+PA (ENSAMBLE) integration experiment ---")
-                auc_mix_e, aucs_mix_e, model_mix_e, scaler_mix_e = run_experiment_popa_ensamble(
-                    name="PO_plus_PA_Ensamble",
+                print("\n--- Running PO+PA (ENSEMBLE) integration experiment ---")
+                auc_mix_e, aucs_mix_e, model_mix_e, scaler_mix_e = run_experiment_popa_ensemble(
+                    name="PO_plus_PA_ensemble",
                     X_po_df=X_po,
                     Y_po_df=Y_po,
                     X_pa_tr_df=X_pa_tr,
                     Y_pa_tr_df=Y_pa_tr,
                     X_pa_te_df=X_pa_te,
                     Y_pa_te_df=Y_pa_te,
-                    covs=covs, species=species,
+                    covs=covs_no_po, species=species,
                     output_dir=exp_dir, region=region, group=group,
                     epochs=EPOCHS,
                     lr=LR,
@@ -870,7 +1036,7 @@ def main():
                     w_po=.5,
                     w_pa=.5
                 )
-                print(f"[Ensamble PO+PA]     Average AUC on PA_test: {auc_mix_e:.4f}")
+                print(f"[ENSEMBLE PO+PA]     Average AUC on PA_test: {auc_mix_e:.4f}")
 
                 
 
@@ -957,16 +1123,18 @@ def main():
                 "group": group or "(all)",
                 "TEST_PA_FRACTION": TEST_PA_FRACTION,
                 "AUC_PO_only": float(np.round(auc_po, 4)) if RUN_PO else np.nan,
+                "AUC_PO_w_bias": float(np.round(auc_po_bias, 4)) if RUN_PO_W_BIAS else np.nan,
                 "AUC_PA_only": float(np.round(auc_pa, 4)) if RUN_PA else np.nan,
                 "AUC_PO_plus_PA": float(np.round(auc_mix, 4)) if RUN_POPA else np.nan,
                 "AUC_PO_plus_PA_imputed": float(np.round(auc_mix_imp, 4)) if RUN_IMPUTED_POPA else np.nan,
-                "AUC_PO_plus_PA_ensamble": float(np.round(auc_mix_e, 4)) if RUN_POPA_ENSAMBLE else np.nan,
+                "AUC_PO_plus_PA_ensemble": float(np.round(auc_mix_e, 4)) if RUN_POPA_ENSEMBLE else np.nan,
                 "AUC_Weighted_PO_plus_PA": float(np.round(auc_mix_w, 4)) if RUN_POPA_WEIGHTED else np.nan,
             })
 
     summary = pd.DataFrame(summary_rows)
     print("\n=== Summary (Average AUC on shared PA_test) ===")
     print(summary.to_string(index=False))
+    print(summary[['AUC_PO_only','AUC_PO_w_bias']].mean())
     summary.to_csv('output/data_integration_results.csv')
 
     elapsed = time() - start_time

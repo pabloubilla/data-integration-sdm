@@ -36,7 +36,7 @@ GROUPS_BY_REGION = {
     }  
 
 ADD_PO_VAR = True            # if True, add PO indicator covariate (it's like a source indicator)
-BIAS_MODEL = True            # set True if you want per-plot bias
+BIAS_MODEL = False            # set True if you want per-plot bias
 TEST_PA_FRACTION = 0.3        # PA split: test fraction
 SEED = 42
 

@@ -1,0 +1,51 @@
+seed: 42
+output_root: output/region_runs
+add_po_var: false
+
+# default training knobs shared across experiments (can be overridden below)
+# train_defaults:
+#   lr: 2.0e-4
+#   epochs: 250
+#   weight_decay: 3.0e-4
+#   bs: 250
+#   hidden_size: 250
+#   hidden_layers: 2
+#   print_every: 100
+
+# to test for EM-method
+train_defaults:
+  lr: 2.0e-4
+  epochs: 300
+  weight_decay: 3.0e-4
+  bs: 1000
+  hidden_size: 250
+  hidden_layers: 2
+  print_every: 100
+
+regions:
+  "AWT": ["_plant", "_bird"]
+  "CAN": [""]
+  "NSW": ["_bat", "_bird", "_plant", "_reptile"]
+  # "NSW": ["_reptile"] # review case with high epochs, nan for abn
+  "NZ": [""]        
+  "SA" : [""]
+  "SWI": [""]
+
+experiments:
+  # - model_type: PO_Only
+
+  # - model_type: PO_Only_BCE
+
+  - model_type: PO_Only_Smooth
+    beta: .8
+
+  # - model_type: PO_Only_ABN
+
+  # - model_type: PO_Only_Plot_Bias
+
+  # - model_type: PO_Only_Plot_Bias_Normalized
+
+  # - model_type: PO_Only_Cov_Bias
+  #   covs_bias: ["x", "y"]
+  #   species_architecture: [500, 500]
+  #   bias_architecture: [1000, 500]

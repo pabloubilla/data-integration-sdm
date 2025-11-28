@@ -15,9 +15,9 @@ add_po_var: false
 # to test for EM-method
 train_defaults:
   lr: 2.0e-4
-  epochs: 300
+  epochs: 200
   weight_decay: 3.0e-4
-  bs: 1000
+  bs: 250
   hidden_size: 250
   hidden_layers: 2
   print_every: 100

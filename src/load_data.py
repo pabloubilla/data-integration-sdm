@@ -15,8 +15,8 @@ def build_paths_nceas(region: str, group_filter: str) -> Tuple[str, str, str]:
     env_path = os.path.join("data", data_state_env_and_pa, "NCEAS", "Records", "test_env", f"{region}test_env{group_filter}.csv")
     return po_path, pa_path, env_path
 
-def load_po_pa_nceas(region: str, group_filter: str, add_po_var: bool, keep_xy: bool = True,
-                     categorical_vars: list = []):
+def load_po_pa_nceas(region: str, group_filter: str, add_po_var: bool, keep_xy: bool = False,
+                     categorical_vars: list = ['ontveg', 'vegsys'], index_col: list = ['x', 'y']) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, List[str], List[str]]    :
     """
     Load PO (aggregated by (x,y)) and PA (full table with covariates & labels),
     return aligned X/Y for PO and PA, with unified species columns and covariates.
@@ -82,26 +82,28 @@ def load_po_pa_nceas(region: str, group_filter: str, add_po_var: bool, keep_xy: 
         covs.extend(dummies)
         all_dummy_cols.extend(dummies)
 
+    # site_index_cols = ['siteid']
+    # site_index_cols = ['x', 'y']
 
     # --- Build Y_po: pivot to multi-label per (x, y)
     Y_po = (
-        df_po.pivot_table(index=['siteid'], columns="spid", aggfunc="size", fill_value=0)
+        df_po.pivot_table(index=index_col, columns="spid", aggfunc="size", fill_value=0)
             .reset_index()
     )
-    Y_po = safe_reindex_columns(Y_po, ['siteid'] + species)
+    Y_po = safe_reindex_columns(Y_po, index_col + species)
     
     
-    Y_po_sid = (
-        df_po.pivot_table(index=['siteid'], columns="spid", aggfunc="size", fill_value=0)
-            .reset_index()
-    )
-    Y_po_sid = safe_reindex_columns(Y_po_sid, ["siteid"] + species)
+    # Y_po_sid = (
+    #     df_po.pivot_table(index=index_col, columns="spid", aggfunc="size", fill_value=0)
+    #         .reset_index()
+    # )
+    # Y_po_sid = safe_reindex_columns(Y_po_sid, ["siteid"] + species)
 
 
 
     # --- X_po: mean covariates at (x, y)
     X_po = (
-        df_po.groupby(['siteid'])[covs]
+        df_po.groupby(index_col)[covs]
             .mean()
             .reset_index()
     )
@@ -119,12 +121,18 @@ def load_po_pa_nceas(region: str, group_filter: str, add_po_var: bool, keep_xy: 
 
 
     # Align PO by (x,y) join
-    XY_po = pd.merge(X_po, Y_po, on=['siteid'], how="inner")
+    XY_po = pd.merge(X_po, Y_po, on=index_col, how="inner")
 
 
     # Split X and Y for PO
     X_po_final = XY_po[covs].copy()
     Y_po_final = XY_po[species].copy()
+
+
+    # # for 30 random rows print Y_pa fully
+    # rand_indices = np.random.choice(Y_pa.index, size=30, replace=False)
+    # print('Random sample of Y_pa:')
+    # print(Y_pa.loc[rand_indices])
 
 
     ### IMPORTANT TO CHECK: Should values be clipped, or exploded, depending on the model
@@ -133,12 +141,19 @@ def load_po_pa_nceas(region: str, group_filter: str, add_po_var: bool, keep_xy: 
     print('Values clipped to 0,1')
     print(np.unique(Y_pa[species].values),np.unique(Y_po_final[species].values))
 
+    
+
+
     # ensure same order
     Y_pa = Y_pa[species]
     Y_po_final = Y_po_final[species]
 
+
     # For PA we already have X_pa, Y_pa aligned to species
     return X_po_final, Y_po_final, X_pa, Y_pa, species, covs
+
+
+
 
 ## FREEZE THIS FOR A SECOND
 def load_po_pa_nceas_OLD(region: str, group_filter: str, add_po_var: bool, keep_xy: bool = True):
@@ -210,11 +225,14 @@ def load_po_pa_nceas_OLD(region: str, group_filter: str, add_po_var: bool, keep_
     Y_po_final = XY_po[species].copy()
 
 
+
     ### IMPORTANT TO CHECK: Should values be clipped, or exploded, depending on the model
-    # Y_po_final[species] = np.clip(Y_po_final[species], 0, 1)
-    # Y_pa[species] = np.clip(Y_pa[species], 0, 1)
-    # print('Values clipped to 0,1')
-    # print(np.unique(Y_pa[species].values),np.unique(Y_po_final[species].values))
+    Y_po_final[species] = np.clip(Y_po_final[species], 0, 1)
+    Y_pa[species] = np.clip(Y_pa[species], 0, 1)
+    print('Values clipped to 0,1')
+    print(np.unique(Y_pa[species].values),np.unique(Y_po_final[species].values))
+
+
 
     # For PA we already have X_pa, Y_pa aligned to species
     return X_po_final, Y_po_final, X_pa, Y_pa, species, covs

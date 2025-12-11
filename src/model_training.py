@@ -105,7 +105,7 @@ def predict_logits(model, X: np.ndarray, *, model_type: str,
         out = model(X_t, None)          # logits or (logits, b)
         logits = out[0] if isinstance(out, (tuple, list)) else out
 
-    elif model_type in ("PO_Only", "PO_Only_Smooth", "PO_Only_BCE"):
+    elif model_type in ("PO_Only", "PO_Only_Smooth", "PO_Only_BCE", "PO_Only_Weak_Neg"):
         logits = model(X_t)
 
     elif model_type == "PO_Only_ABN":
@@ -182,6 +182,19 @@ def smooth_targets_v3(y_true: torch.Tensor, logits: torch.Tensor, beta) -> torch
 
     return smooth_targets
 
+def weaken_negatives(y_true: torch.Tensor,
+                    lamb: float) -> torch.Tensor:
+    """
+    Build soft targets:
+      if y==1 -> keep 1
+      if y==0 -> use (1-alpha) * p_model (DETACHED)
+    """
+    with torch.no_grad():
+        p = torch.sigmoid(logits)
+    # y_smooth = y*1 + (1-y) * (1-alpha) * p
+    y_smooth = torch.where(y_true > 0, y_true, (1 - lamb) * p)
+    return y_smooth
+
 # def smooth_targets(y_true: torch.Tensor,
 #                     logits: torch.Tensor,
 #                     beta: float | np.array) -> torch.Tensor:
@@ -211,13 +224,13 @@ def train_loop(model, loader, loss_fn, dataset = None, *, train_cfg: dict, devic
     grad_clip = train_cfg.get("grad_clip")
     n = len(loader.dataset)
 
-    # if model is ABN, remove theta from weight_decay
-    if train_cfg['model_type'] == 'PO_Only_ABN':
-        # remove theta from weight decay using its name
-        opt = torch.optim.Adam([
-            {'params': [param for name, param in model.named_parameters() if name != 'logit_theta'], 'weight_decay': train_cfg.get('weight_decay',3e-4)},
-            {'params': [model.logit_theta], 'weight_decay': 0.0}
-        ], lr=train_cfg.get('lr',1e-4))
+    # # if model is ABN, remove theta from weight_decay
+    # if train_cfg['model_type'] == 'PO_Only_ABN':
+    #     # remove theta from weight decay using its name
+    #     opt = torch.optim.Adam([
+    #         {'params': [param for name, param in model.named_parameters() if name != 'logit_theta'], 'weight_decay': train_cfg.get('weight_decay',3e-4)},
+    #         {'params': [model.logit_theta], 'weight_decay': 0.0}
+    #     ], lr=train_cfg.get('lr',1e-4))
 
     beta = np.array(train_cfg.get("beta")) # only used for Smooth Model
     if beta: print(f"Initial beta: {beta}")
@@ -244,10 +257,25 @@ def train_loop(model, loader, loss_fn, dataset = None, *, train_cfg: dict, devic
                 logits = model(xb)
                 loss = loss_fn(logits, yb)
 
-            elif train_cfg['model_type'] == 'PO_Only_Smooth':
+            elif train_cfg['model_type'] in ("PO_Only_Smooth", "PO_Only_Weak_Neg"):
                 logits = model(xb)
 
-                y_soft = smooth_targets_v3(yb, logits, beta)
+                if train_cfg['model_type'] == 'PO_Only_Weak_Neg':
+                    # se lambda to 1/Batch size
+                    # y_soft = weaken_negatives(yb, logits, lamb=1.0/xb.size(0))
+                    L = xb.size(0)
+                    # if L <= 1:
+                    #     L = 2
+                    weight_y_zero = 1.0/(L-1)
+                    weights_y_one = 1.0
+                    weights = torch.where(yb == 1, torch.ones_like(yb) * weights_y_one, torch.ones_like(yb) * weight_y_zero)
+                    loss_function = torch.nn.BCEWithLogitsLoss(weight=weights)
+                    loss = loss_function(logits, yb)
+
+                    # loss = loss_fn(logits, yb, weight=weights)
+                else:
+                    y_soft = smooth_targets_v3(yb, logits, beta)
+                    loss = loss_fn(logits, y_soft)
 
                 # trheshold for soft as a function of the epoch
                 # threshold_zero = epoch / train_cfg['epochs'] * 0.01
@@ -255,7 +283,7 @@ def train_loop(model, loader, loss_fn, dataset = None, *, train_cfg: dict, devic
 
                 # IMPORTANT: pass the soft targets into the same loss
                 # Works with BCEWithLogitsLoss (soft labels) and your deepmaxent losses (soft targets)
-                loss = loss_fn(logits, y_soft)
+                
 
                             # if train_cfg['model_type'] == 'PO_Only_Smooth':
 
@@ -266,7 +294,9 @@ def train_loop(model, loader, loss_fn, dataset = None, *, train_cfg: dict, devic
 
                 p = torch.sigmoid(logit_p)                           # [B, C]
                 theta = torch.sigmoid(logit_theta)                   # [C]
-
+                # take the mean (1 value)
+                # theta = theta.mean(dim=0)                             # [1]
+       
 
                 # (optional but helps stability a lot)
                 p = p.clamp(eps, 1 - eps)               # avoid exact 0/1 probs
@@ -302,14 +332,7 @@ def train_loop(model, loader, loss_fn, dataset = None, *, train_cfg: dict, devic
                 loss = loss_fn(p, theta, yb, q)
 
 
-                # print(F'Epoch {epoch}: Loss {loss}')
-                # print(yb[268,5])
-                # # count of species for yb
-                # print(torch.sum(yb, dim=0))
-                # print(p[268,5])
-                # print(q[268,5])
-                # print(logit_p[268,5])
-                # print(logit_theta[5])
+
 
             
 

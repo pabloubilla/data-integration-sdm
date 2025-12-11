@@ -35,27 +35,28 @@ from src.model_training import smooth_targets_v3
 # Config
 # =========================
 # REGIONS = ["AWT", "NZ", "SWI"]
-REGIONS = ['NSW']
-# REGIONS = ["AWT", "CAN", "NSW", "SA", "SWI", "NZ"]             # regions to run
+# REGIONS = ['AWT']
+REGIONS = ["AWT", "CAN", "NSW", "SA", "SWI", "NZ"]             # regions to run
+# REGIONS = ['SWI']
 GROUPS_BY_REGION = {
         # "AWT": ["_bird"],
         "AWT": ["_plant", "_bird"],
         "CAN": [""],
-        "NSW": ['_plant'],
-        # "NSW": ['_bat', '_bird' '_plant', '_reptile'],
+        # "NSW": ['_plant', ],
+        "NSW": ['_bat', '_bird', '_plant', '_reptile'],
         "SA" : [""],
         "SWI": [""],
         "NZ": [""]
     }  
 # General Experiment settings
-ADD_PO_VAR = True            # if True, add PO indicator covariate (it's like a Tsource indicator)
+ADD_PO_VAR = False            # if True, add PO indicator covariate (it's like a Tsource indicator)
 BIAS_MODEL = False            # set True for per-plot bias
 KEEP_XY = True  # if True, keep x,y in covariates
-TEST_PA_FRACTION = 0.5        # PA split: test fraction
+TEST_PA_FRACTION = 0.3        # PA split: test fraction
 # FILTER_PO = True
 
 # Model / training
-HIDDEN_SIZE = 250
+HIDDEN_SIZE = 100
 # HIDDEN_BIAS_SIZE = 3000
 HIDDEN_LAYERS = 2
 LR = 1e-4
@@ -65,11 +66,11 @@ MAX_BATCH_PERCENTAGE = 1
 PRINT_EVERY = 1000
 SEED = 42
 
-RUN_PO = False
-RUN_PA = False
+RUN_PO = True
+RUN_PA = True
 RUN_POPA, ADD_INTERACTIONS = True, False
 RUN_POPA_SMOOTHED = True
-RUN_POPA_ENSEMBLE = False
+RUN_POPA_ENSEMBLE = True
 
 
 # =========================
@@ -343,8 +344,8 @@ def run_experiment_popa(
         dev = dev or device()
         model.to(dev)
         optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=3e-4)
-
         # criterion_po = deepmaxent_loss()
+
         # criterion_pa = deepmaxent_loss()#torch.nn.BCEWithLogitsLoss()
 
         beta = 0.5  # initial smoothing parameter
@@ -500,7 +501,7 @@ def run_experiment_popa_ensemble(
     train_model(
         model=model_pa,
         train_loader=pa_loader,
-        criterion='bce',
+        criterion='deepmaxent',
         epochs=epochs,
         lr=lr,
         print_every=PRINT_EVERY,
@@ -537,10 +538,10 @@ def run_experiment_popa_ensemble(
 
     disc_ds = XYDataset(X_disc_tr, y_disc_tr)
     # keep batch roughly aligned with base batch_size
-    disc_loader = DataLoader(disc_ds, batch_size=max(32, batch_size), shuffle=True, drop_last=True)
+    disc_loader = DataLoader(disc_ds, batch_size=max(32, batch_size), shuffle=True, drop_last=False)
 
     model_disc = deepmaxent_model(
-        input_size=len(covs), hidden_size=HIDDEN_SIZE,
+        input_size=len(covs), hidden_size=int(HIDDEN_SIZE/3),
         output_size=1, hidden_nbr=HIDDEN_LAYERS
     )
     train_model(
@@ -565,20 +566,20 @@ def run_experiment_popa_ensemble(
 
     # ---- normalization ----
     # PA + PO: row-wise softmax or normalize by sum
-    exp_pa = np.exp(logits_pa - np.max(logits_pa, axis=1, keepdims=True))
-    scores_pa = exp_pa / np.clip(exp_pa.sum(axis=1, keepdims=True), 1e-8, None)
-    sum_sites_pa = np.sum(scores_pa, axis = 1)
+    # exp_pa = np.exp(logits_pa - np.max(logits_pa, axis=1, keepdims=True))
+    # scores_pa = exp_pa / np.clip(exp_pa.sum(axis=1, keepdims=True), 1e-8, None)
+    # sum_sites_pa = np.sum(scores_pa, axis = 1)
 
-    exp_po = np.exp(logits_po - np.max(logits_po, axis=1, keepdims=True))
-    scores_po = exp_po / np.clip(exp_po.sum(axis=1, keepdims=True), 1e-8, None)
+    # exp_po = np.exp(logits_po - np.max(logits_po, axis=1, keepdims=True))
+    # scores_po = exp_po / np.clip(exp_po.sum(axis=1, keepdims=True), 1e-8, None)
 
-    # discriminator: sigmoid for probability
+    # # discriminator: sigmoid for probability
     p_is_pa = 1 / (1 + np.exp(-logits_disc))
     if p_is_pa.ndim == 2 and p_is_pa.shape[1] == 1:
         p_is_pa = p_is_pa.reshape(-1, 1)
 
     # ---- weighted ensemble ----
-    scores_ens = p_is_pa * scores_pa + (1.0 - p_is_pa) * scores_po
+    scores_ens = p_is_pa * logits_pa + (1.0 - p_is_pa) * logits_po
 
     # ---- debug print ----    
     # for i in range(scores_ens.shape[0]):
@@ -649,8 +650,12 @@ def main():
                 region=region,
                 group_filter=group,
                 add_po_var=False,
-                keep_xy=False
+                keep_xy=True
             )
+
+            covs = [c for c in covs if c not in ['x','y']] 
+            covs_xy = ['x','y'] if KEEP_XY else []
+            covs_total = covs_xy + covs
 
             # # 2) Split PA → train/test (fixed for all experiments)
             # X_pa_tr, X_pa_te, Y_pa_tr, Y_pa_te = split_pa_train_test_spatially(
@@ -663,23 +668,23 @@ def main():
 
             ### test if separable
             # X_po = X_po.drop(columns=["x","y"], errors="ignore")
-            scaler = StandardScaler().fit(X_pa[covs])
+            scaler = StandardScaler().fit(X_pa[covs_total])
             X_po_s = X_po.copy()
-            X_po_s[covs] = scaler.transform(X_po_s[covs])
+            X_po_s[covs_total] = scaler.transform(X_po_s[covs_total])
             X_pa_s = X_pa.copy()
-            X_pa_s[covs] = scaler.transform(X_pa_s[covs])
+            X_pa_s[covs_total] = scaler.transform(X_pa_s[covs_total])
             # # drop PO column if present
             X_po_s = X_po_s.drop(columns=["PO"], errors="ignore")
             X_pa_s = X_pa_s.drop(columns=["PO"], errors="ignore")
             covs_no_po = [c for c in covs if c != "PO"]
             # domain_auc = domain_probe(X_po_s, X_pa_tr_s, covs_copy, verbose=True)
 
-            D = pairwise_distances(X_pa_s[covs].values, metric='euclidean')
+            # D = pairwise_distances(X_pa_s[covs].values, metric='euclidean')
 
 
             # k_list = [2,3,4,5,10,50,100,200,500,750,1000,1500,2000,3000,
             #           4000,5000,6000,7000,8000,9000,10000,10000]
-            k_list = [2,2,3,4,5,10,50,100,500,1000,4000,8000]
+            # k_list = [2,2,3,4,5,10,50,100,500,1000,4000,8000]
     
             # pa_splits_1 = pa_split.splits_by_closest_swaps(D, X_pa_s, Y_pa,
             #                                                test_frac=TEST_PA_FRACTION, n_steps_list=[1,5,10,50,100])
@@ -688,58 +693,21 @@ def main():
             #     D, X_pa_s, Y_pa, covs, TEST_PA_FRACTION,
             #     K_list = k_list
             # )
-            pa_splits = pa_split.splits_along_partition_path(
-                D, X_pa_s, Y_pa, TEST_PA_FRACTION, n_partitions=8
-            )
-
-
-            # pa_splits = pa_splits_1 + pa_splits_2
-
-            # exit()
-
-            # n_steps_list = [1]*2
-            # n_steps_list.extend([2]*2)
-            # for i in range(3):
-            #     n_steps_list.append(i+1)
-            #     n_steps_list.append(i*10 + 3)
-            #     n_steps_list.append(i*100 + 2)
-            #     n_steps_list.append(i*5 + 5)
-            #     n_steps_list.append(i*8 + 2)
-            #     n_steps_list.append(i*50 + 4)
-            # n_steps_list.extend([len(X_pa_s)]*2)
-            # # n_steps_list.append(30000)
-            # # n_steps_list.append(60000)
-            # # K_list = []
-            # # for i in range(4,10):
-            # #     K_list.extend([i]*5)
-
-            # # pa_splits = pa_split.generate_pa_splits_by_closest_swaps(
-            # #     D, 
-            # #     X_pa_s, Y_pa,
-            # #     test_frac=TEST_PA_FRACTION,
-            # #     n_steps_list=n_steps_list
-            # # )
-
-            # pa_splits = pa_split.splits_by_kmeans_multik(
-            #     D, X_pa_s, Y_pa, covs, TEST_PA_FRACTION,
-            #     K_list = n_steps_list
+            # pa_splits = pa_split.splits_along_partition_path(
+            #     D, X_pa_s, Y_pa, TEST_PA_FRACTION, n_partitions=8
             # )
             
+            # pa_splits = pa_split.partition_sweep_one_on_one(
+            #     X_pa_s, Y_pa, covs_xy, covs, 4, select_subset=None)
+            # print(f"Generated {len(pa_splits)} PA splits via sweep")
 
-            # pa_splits_1 = pa_split.splits_by_kmeans_levels(
-            #     D, 
-            #     X_pa_s, Y_pa,
-            #     covs,
-            #     test_frac=TEST_PA_FRACTION,
-            #     steps_down_list=n_steps_list
+            # pa_splits = pa_split.partition_sweep_optimal(
+            #     None, X_pa_s, Y_pa, covs_xy, covs, 
+            #     test_frac=TEST_PA_FRACTION, K = 40, n_partitions=20
             # )
-            # pa_splits_2 = pa_split.splits_by_closest_swaps(
-            #     D,
-            #     X_pa, Y_pa,
-            #     TEST_PA_FRACTION, 
-            #     n_steps_list
-            # )
-            # pa_splits = pa_splits_1 + pa_splits_2
+
+            pa_splits, split_type_list = pa_split.partition_sweep_ranges(
+                X_pa_s, Y_pa, covs, covs, K_clusters=100, select_subset=15, train_proportion=.4)
             print(f"Generated {len(pa_splits)} PA splits via sweep")
 
             for split_id, (X_pa_tr, X_pa_te, Y_pa_tr, Y_pa_te, d_metric) in enumerate(pa_splits):
@@ -835,6 +803,7 @@ def main():
                         w_po=0.5,
                         w_pa=0.5
                     )
+                    print(f"[PO+PA Smooth] Average AUC on PA_test: {auc_mix_smooth:.4f}")   
 
                 if RUN_POPA_ENSEMBLE:
                     auc_mix_ens, aucs_mix_ens, model_mix_ens, scaler_mix_ens = run_experiment_popa_ensemble(
@@ -861,8 +830,10 @@ def main():
                     "region": region,
                     "group": group or "(all)",
                     "split_id": split_id,
-                    "K": k_list[split_id] if k_list is not None else np.nan,
+                    # "K": k_list[split_id] if k_list is not None else np.nan,
                     "train_test_dist": d_metric,
+                    "split_type": split_type_list[split_id][0], #if split_type_list else "unknown",
+                    "test_id": split_type_list[split_id][1], #if split_type_list else "unknown",
                     "TEST_PA_FRACTION": TEST_PA_FRACTION,
                     "AUC_PO_only": float(np.round(auc_po, 4)) if RUN_PO else np.nan,
                     "AUC_PA_only": float(np.round(auc_pa, 4)) if RUN_PA else np.nan,

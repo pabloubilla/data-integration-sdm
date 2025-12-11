@@ -151,7 +151,7 @@ class sdm_model_abn(nn.Module):
         # theta parameter
         self.logit_theta = nn.Parameter(torch.zeros(output_size))  # one per species
         # initialize with closer to 1 probability
-        nn.init.constant_(self.logit_theta, 2.0)  # logit(0.88) ~ 2.0
+        # nn.init.constant_(self.logit_theta, 2.0)  # logit(0.88) ~ 2.0
 
     # def forward(self, xinput):
     #     x = self.fc1_lambda(xinput).relu()
@@ -189,7 +189,7 @@ class sdm_loss_abn(nn.Module):
         theta_b = theta.unsqueeze(0).expand_as(probs).clamp(eps, 1 - eps)
 
         # noise term
-        ll_noise =  10 * q * (
+        ll_noise =  5 * q * (
             (1 - yobs) * torch.log(theta_b) +
             (yobs) * torch.log(1 - theta_b)
         )

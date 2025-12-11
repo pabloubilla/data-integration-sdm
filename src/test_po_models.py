@@ -12,6 +12,8 @@ import pandas as pd
 import torch
 from torch.nn import BCEWithLogitsLoss
 from torch.utils.data import DataLoader
+from torch.utils.data._utils.collate import default_collate
+
 
 # ---- your core building blocks (change module name as needed) ----
 from src.model_training import (
@@ -35,7 +37,7 @@ from src.utils import scale_features
 # -------------------------------
 # utilities
 # -------------------------------
-def set_all_seeds(seed: int = 42) -> None:
+def set_all_seeds(seed: int = 15) -> None:
     import random
     random.seed(seed)
     np.random.seed(seed)
@@ -63,6 +65,40 @@ def make_beta_abs_from_prevalence(Y):
     # return float(beta_abs)
     return .8
 
+def make_mixup_collate(alpha: float):
+    """
+    Returns a collate_fn that applies mixup to (X, Y) inside a dict batch.
+    Assumes each dataset item is a dict with at least keys "X" and "Y".
+    Other keys (Z, I, mask, ...) are passed through unchanged.
+    """
+    def mixup_collate(batch):
+        # This will produce a dict: {"X": tensor[B, ...], "Y": tensor[B, ...], ...}
+        batch_t = default_collate(batch)
+
+        if alpha <= 0:
+            return batch_t
+
+        X = batch_t["X"]
+        Y = batch_t["Y"]
+
+        lam = np.random.beta(alpha, alpha)
+        bsz = X.size(0)
+        # keep it on the same device as X
+        index = torch.randperm(bsz, device=X.device)
+
+        mixed_X = lam * X + (1.0 - lam) * X[index]
+        mixed_Y = lam * Y + (1.0 - lam) * Y[index]
+
+        batch_t["X"] = mixed_X
+        batch_t["Y"] = mixed_Y
+        return batch_t
+
+    return mixup_collate
+
+def alpha_scale(n, k=30, alpha_min=0.1, alpha_max=1.5):
+    return max(alpha_min, min(alpha_max, k / (n**0.5) + alpha_min))
+
+
 # -------------------------------
 # experiment runner (one method)
 # -------------------------------
@@ -75,6 +111,7 @@ def run_one_method(
     covs: List[str],
     species: List[str],
     out_dir: str,
+    include_mixup: bool = False,
 ) -> Tuple[float, Dict[str, float], str]:
     """
     Trains the given model_type on PO (scaled), evaluates on PA (scaled),
@@ -95,9 +132,31 @@ def run_one_method(
     covs_bias = train_cfg.get("covs_bias", ["x", "y"])
     covs_species = [c for c in covs if c not in covs_bias]
 
+    # mixup_alpha = float(train_cfg.get("mixup_alpha", 0.4))
+    if include_mixup:
+        mixup_alpha = alpha_scale(len(X_po_scaled))
+        print(f'Using mixup alpha: {mixup_alpha:.4f}')
+
+    # Helper: make a loader, optionally with mixup (for X,Y-only datasets)
+    # ------------------------------------------------------------------
+    def make_loader_xy(ds):
+        if include_mixup and model_type in {
+            "PO_Only",
+            "PO_Only_BCE",
+            "PO_Only_Smooth",
+            "PO_Only_Weak_Neg",
+            "PO_Only_ABN",
+        }:
+            collate_fn = make_mixup_collate(mixup_alpha)
+            return DataLoader(ds, bs, shuffle=True, collate_fn=collate_fn)
+        else:
+            return DataLoader(ds, bs, shuffle=True)
+
+
+
     if model_type == "PO_Only":
         ds = SDMDataset(X=X_po_scaled[covs].values, Y=Y_po[species].values)
-        loader = DataLoader(ds, bs, shuffle=True)
+        loader = make_loader_xy(ds)
         model = deepmaxent_model(len(covs), hidden_size, len(species), hidden_layers)
         loss_fn = deepmaxent_loss()
 
@@ -108,7 +167,7 @@ def run_one_method(
     elif model_type == "PO_Only_BCE":
         
         ds = SDMDataset(X=X_po_scaled[covs].values, Y=Y_po[species].values)
-        loader = DataLoader(ds, bs, shuffle=True)
+        loader = make_loader_xy(ds)
         model = deepmaxent_model(len(covs), hidden_size, len(species), hidden_layers)
         # deepmaxent_loss supports soft targets as you built
         loss_fn = BCEWithLogitsLoss()
@@ -126,7 +185,7 @@ def run_one_method(
         print(f'Beta has been set to: {beta}')
 
         ds = SDMDataset(X=X_po_scaled[covs].values, Y=Y_po[species].values)
-        loader = DataLoader(ds, bs, shuffle=True)
+        loader = make_loader_xy(ds)
         model = deepmaxent_model(len(covs), hidden_size, len(species), hidden_layers)
         # deepmaxent_loss supports soft targets as you built
         # loss_fn = BCEWithLogitsLoss()
@@ -136,9 +195,27 @@ def run_one_method(
         logits = predict_logits(model, X_pa_scaled[covs].values, model_type=model_type)
         model_path = os.path.join(method_dir, "model.pt")
 
+    elif model_type == "PO_Only_Weak_Neg":
+        # train_cfg['beta'] = make_beta_abs_from_prevalence(Y_po[species].values)
+        # train_cfg['beta'] = .8    
+        beta = train_cfg.get('beta')
+
+        print(f'Beta has been set to: {beta}')
+
+        ds = SDMDataset(X=X_po_scaled[covs].values, Y=Y_po[species].values)
+        loader = make_loader_xy(ds)
+        model = deepmaxent_model(len(covs), hidden_size, len(species), hidden_layers)
+        # deepmaxent_loss supports soft targets as you built
+        loss_fn = BCEWithLogitsLoss()
+        # loss_fn = deepmaxent_loss()
+
+        train_loop(model, loader=loader, loss_fn=loss_fn, train_cfg={**train_cfg, "model_type": model_type})
+        logits = predict_logits(model, X_pa_scaled[covs].values, model_type=model_type)
+        model_path = os.path.join(method_dir, "model.pt")
+
     elif model_type == "PO_Only_ABN":
         ds = SDMDataset(X=X_po_scaled[covs].values, Y=Y_po[species].values)
-        loader = DataLoader(ds, bs, shuffle=True)
+        loader = make_loader_xy(ds)
         model = sdm_model_abn(len(covs), hidden_size, len(species), hidden_layers)
         loss_fn = sdm_loss_abn()
 
@@ -149,7 +226,7 @@ def run_one_method(
     elif model_type == "PO_Only_Plot_Bias":
         I_train = np.arange(len(X_po_scaled))
         ds = SDMDataset(X=X_po_scaled[covs].values, Y=Y_po[species].values, I=I_train)
-        loader = DataLoader(ds, bs, shuffle=True)
+        loader = make_loader_xy(ds)
         model = deepmaxent_model_w_bias(len(covs), hidden_size, len(species), hidden_layers,
                                         num_plots=len(X_po_scaled), separate=False)
         # your example uses BCE for this variant
@@ -163,7 +240,7 @@ def run_one_method(
     elif model_type == "PO_Only_Plot_Bias_Normalized":
         I_train = np.arange(len(X_po_scaled))
         ds = SDMDataset(X=X_po_scaled[covs].values, Y=Y_po[species].values, I=I_train)
-        loader = DataLoader(ds, bs, shuffle=True)
+        loader = make_loader_xy(ds)
         model = deepmaxent_model_w_bias(len(covs), hidden_size, len(species), hidden_layers,
                                         num_plots=len(X_po_scaled), separate=True)
         loss_fn = deepmaxent_loss_w_bias()
@@ -180,7 +257,7 @@ def run_one_method(
             Y=Y_po[species].values,
             Z=X_po_scaled[covs_bias].values
         )
-        loader = DataLoader(ds, bs, shuffle=True)
+        loader = make_loader_xy(ds)
         sp_arch = tuple(train_cfg.get("species_architecture", (500, 500)))
         bi_arch = tuple(train_cfg.get("bias_architecture", (1000, 500)))
         model = SDMWithBias(len(covs_species), len(species), len(covs_bias),
@@ -200,8 +277,27 @@ def run_one_method(
         raise ValueError(f"Unknown model_type: {model_type}")
 
     # ----- evaluate -----
+    # print some logits
+    # print('Sample logits for first species:', logits[:10,0])
+
     aucs = per_species_auc(Y_pa[species], logits, species)
+
+    # print each AUC with species name
+    # for sp in species:
+    #     print(f'Species: {sp} | AUC: {aucs[sp]:.4f}')
+
     avg_auc = float(np.nanmean(list(aucs.values())))
+    # print(f'-- Eval AUC on PA data: {avg_auc:.4f} --')
+
+    # exit()
+
+
+    # # do a evaluation check in PO
+    # logits_po = predict_logits(model, X_po_scaled[covs].values, model_type=model_type)
+    # aucs_po = per_species_auc(Y_po[species], logits_po, species)
+    # avg_auc_po = float(np.nanmean(list(aucs_po.values())))
+    # print(f'-- Eval AUC on PO training data: {avg_auc_po:.4f} --')
+    # exit()
 
     # ----- save artifacts -----
     torch.save(model, model_path)
@@ -254,8 +350,10 @@ def main():
             # TODO: Try to generalize how different methods might use different covariates 
             # print(covs)
             # exit()
-            env_covs = covs[2:]
-            spatial_covs = covs[:2]
+            env_covs = [c for c in covs if c not in ['x', 'y', 'PO']]
+            spatial_covs = ['x', 'y']
+            # env_covs = covs[2:]
+            # spatial_covs = covs[:2]
             # print(covs)
 
 
@@ -293,10 +391,12 @@ def main():
                     covs=covs_to_use,
                     species=species,
                     out_dir=exp_dir,
+                    include_mixup=exp.get("include_mixup", False),
                 )
 
-                print(f"{region}{group} | {model_type} -> {model_type}: AVG AUC = {avg_auc:.4f}")
-
+                print('-'*40)
+                print(f"{region}{group} | {model_type} : AVG AUC = {avg_auc:.4f}")
+                print('-'*40)
             
 
                 summary_rows.append({
@@ -321,10 +421,13 @@ def main():
     summary_df = pd.DataFrame(summary_rows)
     summary_csv = os.path.join(output_root, "summary.csv")
     summary_df.to_csv(summary_csv, index=False)
+    print('Means by group:')
+    print(summary_df.groupby(['model_type','region'])['avg_auc'].mean())
 
     summary_species_df = pd.DataFrame(summary_per_species)
     summary_species_csv = os.path.join(output_root, "summary_species.csv")
     summary_species_df.to_csv(summary_species_csv)
+    print('Means by species:')
     print(summary_species_df.groupby(['model_type','region'])['auc'].mean())
 
     

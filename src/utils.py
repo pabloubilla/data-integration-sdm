@@ -1,5 +1,6 @@
 import numpy as np
 from sklearn.cluster import KMeans
+from k_means_constrained import KMeansConstrained
 from sklearn.model_selection import train_test_split
 import pandas as pd
 from typing import Tuple, List
@@ -40,7 +41,8 @@ def split_pa_train_test_kmeans(X_pa, Y_pa, covs, test_frac=0.3, seed=42):
     return X_tr, X_te, Y_tr, Y_te
 
 
-def split_pa_train_test_spatially(X_pa, Y_pa, test_frac=0.3, seed=42):
+def split_pa_train_test_spatially(X_pa, Y_pa, test_frac=0.3, seed=42, K: int = 10) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    
     """
     Split presence–absence data into spatially distinct train/test sets.
     Falls back to random split if no 'x'/'y' columns found.
@@ -53,7 +55,7 @@ def split_pa_train_test_spatially(X_pa, Y_pa, test_frac=0.3, seed=42):
         coords = (coords - np.mean(coords,axis=0))/np.std(coords,axis=0)
 
         # Use KMeans to make spatial clusters
-        n_clusters = max(10, int(1 / test_frac))  # adaptive number of clusters
+        n_clusters = max(K, int(1 / test_frac))  # adaptive number of clusters
         kmeans = KMeans(n_clusters=n_clusters, random_state=seed)
         clusters = kmeans.fit_predict(coords)
 

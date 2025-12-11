@@ -9,6 +9,9 @@ from sklearn.metrics import pairwise_distances
 from sklearn.cluster import KMeans
 from sklearn.cluster import AgglomerativeClustering
 from scipy.stats import entropy
+from k_means_constrained import KMeansConstrained
+
+from src.distance_optimizer import optimize_cluster_split, minimize_cluster_split, centroid_dist
 
 def partition_distance(A, B, D):
     '''
@@ -1225,6 +1228,274 @@ def path_between_partitions(A_start: np.ndarray,
     return partitions
 
 
+
+def partition_sweep_one_on_one(
+    X_pa: pd.DataFrame,
+    Y_pa: pd.DataFrame,
+    covs_cluster: list,
+    covs_distance: list,
+    K_clusters: int = 10,
+    select_subset: int = 20,
+):
+
+    D = pairwise_distances(
+        X_pa[covs_distance].to_numpy(),
+        metric='euclidean'
+    )
+
+    # generate K clusters with size constrained
+    n_samples = len(X_pa)
+    avg = n_samples / K_clusters
+    min_size = np.floor(avg)
+    max_size = np.ceil(avg)
+
+    print(f"Generating {K_clusters} clusters with sizes in [{min_size}, {max_size}]")
+    kmeans = KMeansConstrained(
+        n_clusters=K_clusters,
+        size_min=min_size,
+        size_max=max_size,
+        random_state=42,
+        n_init=10,
+    )
+
+    X_coords = X_pa[covs_cluster].to_numpy()
+    labels = kmeans.fit_predict(X_coords)
+
+    unique_labels = np.unique(labels)
+
+    splits = []
+
+    print('Calculating all one-on-one cluster splits...')
+    for test_ix in unique_labels:
+        for train_ix in unique_labels:
+            if test_ix == train_ix:
+                continue
+
+            test_mask = (labels == test_ix)
+            train_mask = (labels == train_ix)
+
+            A = np.where(test_mask)[0]
+            B = np.where(train_mask)[0]
+
+            X_pa_tr = X_pa.iloc[B].reset_index(drop=True)
+            X_pa_te = X_pa.iloc[A].reset_index(drop=True)
+            Y_pa_tr = Y_pa.iloc[B].reset_index(drop=True)
+            Y_pa_te = Y_pa.iloc[A].reset_index(drop=True)
+
+            d_metric = partition_distance(A, B, D)
+
+            splits.append((X_pa_tr, X_pa_te, Y_pa_tr, Y_pa_te, d_metric))
+            # print(f"Cluster pair (test={test_ix}, train={train_ix}): distance={d_metric}")
+    
+    # Select `select_at_random` splits so that distances are as uniform as possible
+    n_splits = len(splits)
+    if (select_subset is None) or (select_subset >= n_splits):
+        # Just take all splits
+        selected_splits = splits
+    else:
+        # Sort splits by distance
+        splits_sorted = sorted(splits, key=lambda s: s[4])  # s[4] is d_metric
+
+        # Pick approximately uniformly spaced indices in [0, n_splits-1]
+        idx = np.linspace(0, n_splits - 1, num=select_subset)
+        idx = np.round(idx).astype(int)
+        idx = np.unique(idx)  # just in case of rounding collisions
+
+        selected_splits = [splits_sorted[i] for i in idx]
+    
+    for s in selected_splits:
+        print(f"Selected split with distance={s[4]}")
+
+    return selected_splits
+
+
+def partition_sweep_optimal(
+    D: np.ndarray,
+    X_pa: pd.DataFrame,
+    Y_pa: pd.DataFrame,
+    covs_cluster: list,
+    covs_distance: list,
+    test_frac: float = 0.4,
+    K: int = 20 ,
+    n_partitions: int = 10,
+):
+# generate K clusters with size constrained
+    n_samples = len(X_pa)
+    avg = n_samples / K
+    min_size = np.floor(avg)
+    max_size = np.ceil(avg)
+
+    print(f"Generating {K} clusters with sizes in [{min_size}, {max_size}]")
+    kmeans = KMeansConstrained(
+        n_clusters=K,
+        size_min=min_size,
+        size_max=max_size,
+        random_state=42,
+        n_init=10,
+    )
+
+    X_coords = X_pa[covs_cluster].to_numpy()
+    labels = kmeans.fit_predict(X_coords)
+
+    # check this after, and change for Mahalanobis
+    D_centroids = centroid_dist(pd.DataFrame({
+        'x': X_coords[:, 0],
+        'y': X_coords[:, 1],
+        'cluster': labels
+    }))
+
+    k_for_optimization = int(K*test_frac)
+    print(D_centroids)
+    print(f"Optimizing over k={k_for_optimization} clusters...")
+    max_cluster_assignment, max_distance = optimize_cluster_split(
+        D_centroids,
+        k_for_optimization
+    )
+    min_cluster_assignment, min_distance = minimize_cluster_split(
+        D_centroids,
+        k_for_optimization
+    )   
+    print(f"Max distance: {max_distance}, Min distance: {min_distance}")
+    objective_distances = np.linspace(max_distance, min_distance, n_partitions)
+    print(f"Objective distances along path: {objective_distances}")
+
+    splits = []
+    for i, dist in enumerate(objective_distances):
+        print(f"Processing partition {i+1}/{n_partitions} with target distance {dist}...")
+        
+        if i == 0:
+            cluster_assignment, final_distance = max_cluster_assignment, max_distance
+        elif i == n_partitions - 1:
+            cluster_assignment, final_distance = min_cluster_assignment, min_distance
+        else: 
+            cluster_assignment, final_distance = minimize_cluster_split(
+                D_centroids,
+                k_for_optimization,
+                target_min_distance=dist)
+            print(f'Target {dist}, achieved {final_distance}')
+
+        test_clusters = [i for i, v in enumerate(cluster_assignment) if v > 0.5]
+        train_clusters = [i for i, v in enumerate(cluster_assignment) if v <= 0.5]
+
+        test_mask = np.isin(labels, test_clusters)
+        train_mask = np.isin(labels, train_clusters)
+        A = np.where(test_mask)[0]
+        B = np.where(train_mask)[0]
+        X_pa_tr = X_pa.iloc[B].reset_index(drop=True)
+        X_pa_te = X_pa.iloc[A].reset_index(drop=True)
+        Y_pa_tr = Y_pa.iloc[B].reset_index(drop=True)
+        Y_pa_te = Y_pa.iloc[A].reset_index(drop=True)
+        
+        # # this should be the real metric, for now we will use 
+        # # the centroid distance as a proxy
+        # d_metric = partition_distance(A, B, D) 
+
+        d_metric = final_distance
+
+        print(f"Partition {i+1}: distance={d_metric}, |A|={len(A)}, |B|={len(B)}")
+        # yield (X_pa_tr, X_pa_te, Y_pa_tr, Y_pa_te, d_metric) # version with yield
+        splits.append((X_pa_tr, X_pa_te, Y_pa_tr, Y_pa_te, d_metric))
+    return splits
+
+
+def partition_sweep_ranges(
+    X_pa: pd.DataFrame,
+    Y_pa: pd.DataFrame,
+    covs_cluster: list,
+    covs_distance: list,
+    K_clusters: int = 50,
+    select_subset: int = 20,
+    train_proportion = .4
+):
+
+    D = pairwise_distances(
+        X_pa[covs_distance].to_numpy(),
+        metric='mahalanobis'
+    )
+
+    # generate K clusters with size constrained
+    n_samples = len(X_pa)
+    if n_samples / K_clusters < 10:
+        K_clusters = n_samples // 10
+        if select_subset > K_clusters:
+            select_subset = K_clusters
+
+        print(f"Adjusted K_clusters to {K_clusters} due to small sample size.")
+    avg = n_samples / K_clusters
+    min_size = np.floor(avg)
+    max_size = np.ceil(avg)
+
+    print(f"Generating {K_clusters} clusters with sizes in [{min_size}, {max_size}]")
+    kmeans = KMeansConstrained(
+        n_clusters=K_clusters,
+        size_min=min_size,
+        size_max=max_size,
+        random_state=42,
+        n_init=10,
+    )
+
+    X_coords = X_pa[covs_cluster].to_numpy()
+    labels = kmeans.fit_predict(X_coords)
+
+    # centroids calculation using covs_distance
+    centroids = np.array([X_pa[covs_distance].iloc[labels == i].mean(axis=0) for i in range(K_clusters)])
+    # distance between centroids
+    D_centroids = pairwise_distances(
+        centroids,
+        metric='mahalanobis'
+    )
+
+    unique_labels = np.unique(labels)
+
+    splits = []
+    split_type_list = []
+
+    # select subset of unique labels to reduce number of splits (these are for test, at random)
+    selected_labels = np.random.choice(unique_labels, size=select_subset, replace=False)
+
+    clusters_in_train = int(K_clusters * train_proportion)
+    print(f"Using {clusters_in_train} clusters in train set.")
+
+    for test_ix in selected_labels:
+        # select the closests clusters to test_ix to form train set using D_centroids
+        dists_to_test = D_centroids[test_ix].copy()
+        dists_to_test[test_ix] = np.inf  # ignore self-distance
+
+        # one with the closests clusters_in_train, one with the middle clusters_in_train, one with the farthest clusters_in_train
+        for option in ['closest', 'middle', 'farthest']:
+            if option == 'closest':
+                train_ixs = np.argsort(dists_to_test)[:clusters_in_train]
+            elif option == 'middle':
+                sorted_ixs = np.argsort(dists_to_test)
+                start_ix = (K_clusters - clusters_in_train) // 2
+                train_ixs = sorted_ixs[start_ix:start_ix + clusters_in_train]
+            elif option == 'farthest':
+                sorted_ixs = np.argsort(dists_to_test)[::-1]
+                train_ixs = sorted_ixs[:clusters_in_train]
+            
+            # remove test_ix from train_ixs if present
+            train_ixs = train_ixs[train_ixs != test_ix]
+
+            test_mask = (labels == test_ix)
+            train_mask = np.isin(labels, train_ixs)
+            A = np.where(test_mask)[0]
+            B = np.where(train_mask)[0]
+            X_pa_tr = X_pa.iloc[B].reset_index(drop=True)
+            X_pa_te = X_pa.iloc[A].reset_index(drop=True)
+            Y_pa_tr = Y_pa.iloc[B].reset_index(drop=True)
+            Y_pa_te = Y_pa.iloc[A].reset_index(drop=True)
+            d_metric = partition_distance(A, B, D)
+            splits.append((X_pa_tr, X_pa_te, Y_pa_tr, Y_pa_te, d_metric))
+            split_type_list.append((option, test_ix))
+            print(f"Cluster pair (test={test_ix}, train={train_ixs}): distance={d_metric}")
+
+
+
+
+
+    return splits, split_type_list
+  
+    
 if __name__ == '__main__':
 
     D = np.array([

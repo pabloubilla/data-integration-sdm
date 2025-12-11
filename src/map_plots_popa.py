@@ -65,10 +65,7 @@ for region in REGIONS:
             # 3. Data Pre-processing: Ensure coordinates are float and handle potential missing values
             df_pa[['x','y']] = df_pa[['x','y']].astype(float)
             df_po[['x','y']] = df_po[['x','y']].astype(float)
-            
-            # Drop rows with NaN coordinates if any
-            df_pa.dropna(subset=['x', 'y'], inplace=True)
-            df_po.dropna(subset=['x', 'y'], inplace=True)
+
 
 
             # 4. Create GeoDataFrames
@@ -95,46 +92,46 @@ for region in REGIONS:
             fig, (ax1, ax2) = plt.subplots(figsize=(12, 6), nrows=1, ncols=2)
             
             # Set a common main title for the figure
-            main_title = f"Data Distribution | Region: {region_upper} | Group: {'All Species' if group == '' else group.capitalize()}"
-            fig.suptitle(main_title, fontsize=14, fontweight='bold', y=1.02)
+            # main_title = f"Data Distribution | Region: {region_upper} | Group: {'All Species' if group == '' else group.capitalize()}"
+            # fig.suptitle(main_title, fontsize=14, fontweight='bold', y=1.02)
             
             # --- Subplot 1: Presence-Absence (PA) ---
             
             # Boundary Map (Base Layer: light gray, dark border)
-            gdf_map.plot(ax=ax1, color="#f0f0f0", edgecolor="#333333", linewidth=0.7, alpha=0.8)
+            gdf_map.plot(ax=ax1, color="#e6e1f6", edgecolor="#333333", linewidth=0.7, alpha=0.8)
             
             # Points (Emerald green)
             gdf_points_pa.plot(
                 ax=ax1, 
-                color="#10b981", 
+                color="#309573", 
                 markersize=5, 
-                label=f"PA Records ({count_pa})", 
-                alpha=0.7
+                # label=f"PA Records     ({count_pa})", 
+                alpha=0.5
             )
             
-            ax1.set_title(f"Presence-Absence Records (Count: {count_pa})", fontsize=12)
+            ax1.set_title(f"Presence-Absence Records ($N={count_pa}$)", fontsize=10)
             ax1.set_axis_off() # Remove axes for cleaner map view
-            ax1.legend(loc='lower left', frameon=True, fancybox=True, shadow=True)
+            # ax1.legend(loc='lower left', frameon=True, fancybox=True, shadow=True)
             ax1.set_aspect('equal')
             ax1.set_facecolor('#f7f7f7') # Subtle background for the plot area
 
             # --- Subplot 2: Presence-Only (PO) ---
             
             # Boundary Map (Base Layer: light gray, dark border)
-            gdf_map.plot(ax=ax2, color="#f0f0f0", edgecolor="#333333", linewidth=0.7, alpha=0.8)
+            gdf_map.plot(ax=ax2, color="#e6e1f6", edgecolor="#333333", linewidth=0.7, alpha=0.8)
             
             # Points (Vibrant Red)
             gdf_points_po.plot(
                 ax=ax2, 
-                color="#ef4444", 
+                color="#c23b12", 
                 markersize=5, 
-                label=f"PO Records ({count_po})", 
-                alpha=0.7
+                # label=f"PO Records ({count_po})", 
+                alpha=0.5
             )
 
-            ax2.set_title(f"Presence-Only Records (Count: {count_po})", fontsize=12)
+            ax2.set_title(f"Presence-Only Records ($N={count_po}$)", fontsize=10)
             ax2.set_axis_off() # Remove axes for cleaner map view
-            ax2.legend(loc='lower left', frameon=True, fancybox=True, shadow=True)
+            # ax2.legend(loc='lower left', frameon=True, fancybox=True, shadow=True)
             ax2.set_aspect('equal')
             ax2.set_facecolor('#f7f7f7') # Subtle background for the plot area
 

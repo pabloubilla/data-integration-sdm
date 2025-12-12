@@ -30,7 +30,7 @@ for file in train_po_files:
 
 
     # Map to same column, only replace if in mapping
-    # df['group'] = df['group'].map(group_mapping).fillna(df['group'])
+    df['group'] = df['group'].map(group_mapping).fillna(df['group'])
 
     groups = df['group'].unique()
     # if only one group, create a new file with the same name in output_path

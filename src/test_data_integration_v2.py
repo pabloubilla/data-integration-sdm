@@ -4,7 +4,7 @@
 
 import os
 import random
-from typing import List, Tuple, Dict
+from typing import List, Tuple, Dict, Optional
 from time import time
 
 import numpy as np
@@ -99,7 +99,7 @@ def device() -> torch.device:
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 class XYDataset(Dataset):
-    def __init__(self, X: np.ndarray, Y: np.ndarray, plot_ids: np.ndarray | None = None):
+    def __init__(self, X: np.ndarray, Y: np.ndarray, plot_ids: Optional[np.ndarray] = None):
         self.X = torch.tensor(X, dtype=torch.float32)
         self.Y = torch.tensor(Y, dtype=torch.float32)
         self.plot_ids = None if plot_ids is None else torch.tensor(plot_ids, dtype=torch.long)
@@ -144,7 +144,7 @@ class XZYDataset(Dataset):
 # =========================
 # Train / Eval helpers
 # =========================
-def build_model(input_size: int, output_size: int, bias: bool, num_plots: int | None = None) -> nn.Module:
+def build_model(input_size: int, output_size: int, bias: bool, num_plots: Optional[int] = None) -> nn.Module:
     if bias:
         if num_plots is None:
             raise ValueError("num_plots required for bias model.")
@@ -170,7 +170,7 @@ def train_model(
     epochs: int = 1000,
     lr: float = 1e-4,
     print_every: int = 1000,
-    dev: torch.device | None = None,
+    dev: Optional[torch.device] = None,
     verbose: bool = False,
 ):
     dev = dev or device()
@@ -368,7 +368,7 @@ def run_experiment_popa_smoothed_w_prior(
         criterion_species: nn.Module,
         epochs: int = 300,
         lr: float = 1e-4,
-        dev: torch.device | None = None,
+        dev: Optional[torch.device] = None,
         w_po: float = .5,
         w_pa: float = .5,
     ):
@@ -531,7 +531,7 @@ def run_experiment_popa_smoothed(
         criterion_species: nn.Module,
         epochs: int = 300,
         lr: float = 1e-4,
-        dev: torch.device | None = None,
+        dev: Optional[torch.device] = None,
         w_po: float = .5,
         w_pa: float = .5,
     ):
@@ -649,7 +649,7 @@ def train_bias_model(
     epochs: int = 200,
     lr: float = 1e-3,
     print_every: int = 1000,
-    dev: torch.device | None = None,
+    dev: Optional[torch.device] = None,
     verbose: bool = False
 ):
     dev = dev or device()
@@ -683,7 +683,7 @@ def train_bias_model(
 
 
 @torch.no_grad()
-def predict(model: nn.Module, X: np.ndarray, dev: torch.device | None = None) -> np.ndarray:
+def predict(model: nn.Module, X: np.ndarray, dev: Optional[torch.device] = None) -> np.ndarray:
     dev = dev or device()
     model.eval()
     X_t = torch.tensor(X, dtype=torch.float32, device=dev)
@@ -811,7 +811,7 @@ def run_experiment_popa(
         criterion_species: nn.Module,
         epochs: int = 300,
         lr: float = 1e-4,
-        dev: torch.device | None = None,
+        dev: Optional[torch.device] = None,
         w_po: float = .5,
         w_pa: float = .5,
     ):
@@ -1145,7 +1145,7 @@ def run_experiment_tabpfn(
     criterion: str = 'tabpfn',    # kept for API symmetry; unused
     verbose: bool = False,
     N_ensemble_configurations: int = 16,
-) -> Tuple[float, Dict[str, float], str | None, str | None]:
+) -> Tuple[float, Dict[str, float], Optional[str], Optional[str]]:
     """
     Run an experiment using one TabPFNClassifier per species (binary task).
 
@@ -1155,9 +1155,9 @@ def run_experiment_tabpfn(
         Mean AUC across species.
     aucs : dict
         Per-species AUCs, keyed by species name.
-    model_path : str | None
+    model_path : Optional[str]
         (Not saved currently; return None for symmetry.)
-    scaler_path : str | None
+    scaler_path : Optional[str]
         Path to the saved scaler used for covariate scaling.
     """
     if not HAS_TABPFN:

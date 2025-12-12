@@ -3,7 +3,7 @@ from sklearn.cluster import KMeans
 from k_means_constrained import KMeansConstrained
 from sklearn.model_selection import train_test_split
 import pandas as pd
-from typing import Tuple, List
+from typing import Tuple, List, Optional
 from sklearn.preprocessing import StandardScaler
 import pickle
 
@@ -93,7 +93,7 @@ def scale_features(
     X_train: pd.DataFrame,
     X_test: pd.DataFrame,
     covariates: List[str],
-    output_path: str | None = None,
+    output_path: Optional[str] = None,
     verbose: bool = False
 ) -> Tuple[pd.DataFrame, pd.DataFrame, StandardScaler]:
     scaler = StandardScaler().fit(X_train[covariates])

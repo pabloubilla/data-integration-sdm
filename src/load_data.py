@@ -48,16 +48,37 @@ def load_po_pa_nceas(region: str, group_filter: str, add_po_var: bool, keep_xy: 
     # Only consider categorical vars that actually exist in the data
     cat_vars_present = [c for c in (categorical_vars or []) if c in covariates]
 
-    # Helper: add one-hot columns for a single variable given a fixed, shared category list
-    def _one_hot_inplace(df, var, categories, prefix=None):
+    # # Helper: add one-hot columns for a single variable given a fixed, shared category list
+    # def _one_hot_inplace(df, var, categories, prefix=None):
+    #     pref = var if prefix is None else prefix
+    #     for cat in categories:
+    #         col = f"{pref}__{cat}"
+    #         df[col] = (df[var] == cat).astype(int)
+    #     # Ensure the original column exists before dropping
+    #     if var in df.columns:
+    #         df.drop(columns=[var], inplace=True, errors="ignore")
+    #     return [f"{pref}__{cat}" for cat in categories]
+    def _one_hot_inplace(df, var, categories, prefix=None, drop_last=True):
         pref = var if prefix is None else prefix
-        for cat in categories:
+        cats = list(categories)
+
+        # choose a baseline category consistently across PO/ENV
+        if drop_last and len(cats) > 0:
+            baseline = cats[-1]
+            cats_to_encode = cats[:-1]
+        else:
+            cats_to_encode = cats
+
+        new_cols = []
+        for cat in cats_to_encode:
             col = f"{pref}__{cat}"
             df[col] = (df[var] == cat).astype(int)
-        # Ensure the original column exists before dropping
+            new_cols.append(col)
+
         if var in df.columns:
             df.drop(columns=[var], inplace=True, errors="ignore")
-        return [f"{pref}__{cat}" for cat in categories]
+        return new_cols
+
 
     # Build a union of categories across PO & ENV for each categorical var
     dummy_columns_by_var = {}
@@ -236,3 +257,45 @@ def load_po_pa_nceas_OLD(region: str, group_filter: str, add_po_var: bool, keep_
 
     # For PA we already have X_pa, Y_pa aligned to species
     return X_po_final, Y_po_final, X_pa, Y_pa, species, covs
+
+
+
+
+def load_po_pa_geoplant(  
+    data_path_po,
+    data_path_pa,
+    species_prefix: str = "sp_",
+    feature_prefix: str = "A",
+):
+    df_po = pd.read_csv(data_path_po)
+    df_pa = pd.read_csv(data_path_pa)
+
+    # change lon lat cols to x y
+    df_po = df_po.rename(columns={"lon": "x", "lat": "y"})
+    df_pa = df_pa.rename(columns={"lon": "x", "lat": "y"})
+
+    # Identify species columns
+    species_cols_po = [col for col in df_po.columns if col.startswith(species_prefix
+)]
+    species_cols_pa = [col for col in df_pa.columns if col.startswith(species_prefix)]
+
+    # make sure both are the same and in the same order
+    assert set(species_cols_po) == set(species_cols_pa), "Species columns do not match between PO and PA datasets."
+    species_cols = sorted(species_cols_po)
+
+    # Identify feature columns
+    feature_cols_po = [col for col in df_po.columns if col.startswith(feature_prefix)]
+    feature_cols_pa = [col for col in df_pa.columns if col.startswith(feature_prefix)]  
+    # assert
+    assert set(feature_cols_po) == set(feature_cols_pa), "Feature columns do not match between PO and PA datasets."
+    feature_cols = sorted(feature_cols_po)
+
+    # add x and y to feature cols
+    feature_cols = ["x", "y"] + feature_cols
+
+    X_po = df_po[feature_cols].copy()
+    Y_po = df_po[species_cols].copy()
+    X_pa = df_pa[feature_cols].copy()
+    Y_pa = df_pa[species_cols].copy()
+
+    return X_po, Y_po, X_pa, Y_pa, species_cols, feature_cols

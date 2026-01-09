@@ -20,7 +20,7 @@ from sklearn.metrics import roc_auc_score
 from sklearn.linear_model import LogisticRegression
 
 # --- your models & loss
-from src.models import deepmaxent_model, deepmaxent_loss, deepmaxent_model_w_bias, deepmaxent_domain, grad_reverse, DomainDiscriminator, DeepMaxentTwoHead
+from src.models import DeepMaxEntModel, deepmaxent_loss, deepmaxent_model_w_bias, deepmaxent_domain, grad_reverse, DomainDiscriminator, DeepMaxentTwoHead
 
 # =========================
 # Config
@@ -207,7 +207,7 @@ def build_model(input_size: int, output_size: int, bias: bool, num_plots: int | 
             num_plots=num_plots
         )
     else:
-        return deepmaxent_model(
+        return DeepMaxEntModel(
             input_size=input_size,
             hidden_size=HIDDEN_SIZE,
             output_size=output_size,
@@ -634,7 +634,7 @@ def run_experiment_transfer(
 
     # --- model
     # Use non-bias backbone for transfer simplicity (feature_extractor + output_layer expected).
-    model = deepmaxent_model(
+    model = DeepMaxEntModel(
         input_size=len(covs), hidden_size=HIDDEN_SIZE,
         output_size=len(species), hidden_nbr=HIDDEN_LAYERS
     ).to(device())

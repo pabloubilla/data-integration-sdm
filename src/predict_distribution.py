@@ -5,7 +5,7 @@ import os
 # rasterio
 import rasterio
 # deepmaxent
-from src.models import deepmaxent_model
+from src.models import DeepMaxEntModel
 # tqdm for progress bar
 import tqdm
 

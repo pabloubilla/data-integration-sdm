@@ -1,6 +1,6 @@
 import numpy as np
 from sklearn.cluster import KMeans
-from k_means_constrained import KMeansConstrained
+# from k_means_constrained import KMeansConstrained
 from sklearn.model_selection import train_test_split
 import pandas as pd
 from typing import Tuple, List, Optional

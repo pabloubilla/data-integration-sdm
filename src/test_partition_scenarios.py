@@ -27,7 +27,7 @@ from sklearn.cluster import KMeans
 from sklearn.metrics import pairwise_distances
 
 # --- your models & loss
-from src.models import deepmaxent_model, deepmaxent_loss, deepmaxent_model_w_bias
+from src.models import DeepMaxEntModel, deepmaxent_loss, deepmaxent_model_w_bias
 import src.pa_split as pa_split
 from src.model_training import smooth_targets_v3
 
@@ -36,8 +36,9 @@ from src.model_training import smooth_targets_v3
 # =========================
 # REGIONS = ["AWT", "NZ", "SWI"]
 # REGIONS = ['AWT']
-REGIONS = ["AWT", "CAN", "NSW", "SA", "SWI", "NZ"]             # regions to run
-# REGIONS = ['SWI']
+
+# REGIONS = ["AWT", "CAN", "NSW", "SA", "SWI", "NZ"]             # regions to run
+REGIONS = ['SWI']
 GROUPS_BY_REGION = {
         # "AWT": ["_bird"],
         "AWT": ["_plant", "_bird"],
@@ -48,6 +49,10 @@ GROUPS_BY_REGION = {
         "SWI": [""],
         "NZ": [""]
     }  
+
+
+
+
 # General Experiment settings
 ADD_PO_VAR = False            # if True, add PO indicator covariate (it's like a Tsource indicator)
 BIAS_MODEL = False            # set True for per-plot bias
@@ -88,7 +93,7 @@ def device() -> torch.device:
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 class XYDataset(Dataset):
-    def __init__(self, X: np.ndarray, Y: np.ndarray, plot_ids: np.ndarray | None = None):
+    def __init__(self, X: np.ndarray, Y: np.ndarray, plot_ids = None):
         self.X = torch.tensor(X, dtype=torch.float32)
         self.Y = torch.tensor(Y, dtype=torch.float32)
         self.plot_ids = None if plot_ids is None else torch.tensor(plot_ids, dtype=torch.long)
@@ -133,7 +138,7 @@ class XZYDataset(Dataset):
 # =========================
 # Train / Eval helpers
 # =========================
-def build_model(input_size: int, output_size: int, bias: bool, num_plots: int | None = None) -> nn.Module:
+def build_model(input_size: int, output_size: int, bias: bool, num_plots = None) -> nn.Module:
     if bias:
         if num_plots is None:
             raise ValueError("num_plots required for bias model.")
@@ -145,7 +150,7 @@ def build_model(input_size: int, output_size: int, bias: bool, num_plots: int | 
             num_plots=num_plots
         )
     else:
-        return deepmaxent_model(
+        return DeepMaxEntModel(
             input_size=input_size,
             hidden_size=HIDDEN_SIZE,
             output_size=output_size,
@@ -159,7 +164,7 @@ def train_model(
     epochs: int = 1000,
     lr: float = 1e-4,
     print_every: int = 1000,
-    dev: torch.device | None = None,
+    dev: torch.device = None,
     verbose: bool = False,
 ):
     dev = dev or device()
@@ -205,7 +210,7 @@ def train_model(
 
 
 @torch.no_grad()
-def predict(model: nn.Module, X: np.ndarray, dev: torch.device | None = None) -> np.ndarray:
+def predict(model: nn.Module, X: np.ndarray, dev: torch.device = None) -> np.ndarray:
     dev = dev or device()
     model.eval()
     X_t = torch.tensor(X, dtype=torch.float32, device=dev)
@@ -313,7 +318,7 @@ def run_experiment_popa(
 
    
 
-    model = deepmaxent_model(input_size=len(covs), hidden_size=HIDDEN_SIZE, output_size=len(species), hidden_nbr=HIDDEN_LAYERS)
+    model = DeepMaxEntModel(input_size=len(covs), hidden_size=HIDDEN_SIZE, output_size=len(species), hidden_nbr=HIDDEN_LAYERS)
     # criterion_species = deepmaxent_loss()
 
     # loaders separately (proportional sizes)
@@ -337,7 +342,7 @@ def run_experiment_popa(
         criterion_species: nn.Module,
         epochs: int = 300,
         lr: float = 1e-4,
-        dev: torch.device | None = None,
+        dev: torch.device = None,
         w_po: float = .5,
         w_pa: float = .5,
     ):
@@ -494,7 +499,7 @@ def run_experiment_popa_ensemble(
     pa_loader = DataLoader(pa_ds, batch_size=batch_size_pa, shuffle=True, drop_last=True)
 
     # ---- model for PA (multi-label BCE) ----
-    model_pa = deepmaxent_model(
+    model_pa = DeepMaxEntModel(
         input_size=len(covs), hidden_size=HIDDEN_SIZE,
         output_size=len(species), hidden_nbr=HIDDEN_LAYERS
     )
@@ -510,7 +515,7 @@ def run_experiment_popa_ensemble(
     )
 
     # ---- model for PO (DeepMaxEnt loss) ----
-    model_po = deepmaxent_model(
+    model_po = DeepMaxEntModel(
         input_size=len(covs), hidden_size=HIDDEN_SIZE,
         output_size=len(species), hidden_nbr=HIDDEN_LAYERS
     )
@@ -540,7 +545,7 @@ def run_experiment_popa_ensemble(
     # keep batch roughly aligned with base batch_size
     disc_loader = DataLoader(disc_ds, batch_size=max(32, batch_size), shuffle=True, drop_last=False)
 
-    model_disc = deepmaxent_model(
+    model_disc = DeepMaxEntModel(
         input_size=len(covs), hidden_size=int(HIDDEN_SIZE/3),
         output_size=1, hidden_nbr=HIDDEN_LAYERS
     )
@@ -650,12 +655,22 @@ def main():
                 region=region,
                 group_filter=group,
                 add_po_var=False,
-                keep_xy=True
+                keep_xy=True,
+                index_col=['siteid']
             )
 
             covs = [c for c in covs if c not in ['x','y']] 
             covs_xy = ['x','y'] if KEEP_XY else []
             covs_total = covs_xy + covs
+            
+
+            if ADD_PO_VAR:  
+                X_po['PO'] = 1
+                X_pa_tr['PO'] = 0
+                X_pa_te['PO'] = 0
+
+
+
 
             # # 2) Split PA → train/test (fixed for all experiments)
             # X_pa_tr, X_pa_te, Y_pa_tr, Y_pa_te = split_pa_train_test_spatially(
@@ -706,9 +721,14 @@ def main():
             #     test_frac=TEST_PA_FRACTION, K = 40, n_partitions=20
             # )
 
+            # pa_splits, split_type_list = pa_split.partition_sweep_ranges(
+            #     X_pa_s, Y_pa, covs, covs, K_clusters=10, select_subset=10, train_proportion=.4)
+            # print(f"Generated {len(pa_splits)} PA splits via sweep")
+
+            # spatial case, only use xy for partitioning and distance
             pa_splits, split_type_list = pa_split.partition_sweep_ranges(
-                X_pa_s, Y_pa, covs, covs, K_clusters=100, select_subset=15, train_proportion=.4)
-            print(f"Generated {len(pa_splits)} PA splits via sweep")
+                X_pa_s, Y_pa, covs_xy, covs_xy, K_clusters=100, select_subset=10, train_proportion=.4, distance_metric='euclidean')
+
 
             for split_id, (X_pa_tr, X_pa_te, Y_pa_tr, Y_pa_te, d_metric) in enumerate(pa_splits):
                 print(f'---- RUNNING SPLIT NUMBER {split_id} ----')
@@ -755,10 +775,7 @@ def main():
                     print("\n--- Running PO+PA integration experiment ---")
                     print('The covariates used are:', covs)
                     
-                    if ADD_PO_VAR:  
-                        X_po['PO'] = 1
-                        X_pa_tr['PO'] = 0
-                        X_pa_te['PO'] = 0
+
 
 
                     # C) PO + PA_train → PA_test
@@ -770,6 +787,8 @@ def main():
                     # print('LEN X_MIN TRAIN', len(X_mix))
                     # exit()
 
+                    covs_to_use = covs + (['PO'] if ADD_PO_VAR else [])
+
             
                     auc_mix, aucs_mix, model_mix, scaler_mix = run_experiment(
                         name="PO_plus_PA",
@@ -777,7 +796,7 @@ def main():
                         Y_train_df=Y_mix,
                         X_test_df=X_pa_te,
                         Y_test_df=Y_pa_te,
-                        covs=covs, species=species,
+                        covs=covs_to_use, species=species,
                         output_dir=exp_dir, region=region, group=group,
                         criterion = 'deepmaxent'
                     )
@@ -787,6 +806,9 @@ def main():
 
 
                 if RUN_POPA_SMOOTHED:
+
+                    covs_to_use = covs + (['PO'] if ADD_PO_VAR else [])
+
                     auc_mix_smooth, aucs_mix_smooth, model_mix_smooth, scaler_mix_smooth = run_experiment_popa(
                         name="PO_plus_PA_smooth",
                         X_po_df=X_po_s,
@@ -795,7 +817,7 @@ def main():
                         Y_pa_tr_df=Y_pa_tr,
                         X_pa_te_df=X_pa_te,
                         Y_pa_te_df=Y_pa_te,
-                        covs=covs, species=species,
+                        covs=covs_to_use, species=species,
                         output_dir=exp_dir, region=region, group=group,
                         epochs=EPOCHS,
                         lr=LR,
@@ -834,6 +856,8 @@ def main():
                     "train_test_dist": d_metric,
                     "split_type": split_type_list[split_id][0], #if split_type_list else "unknown",
                     "test_id": split_type_list[split_id][1], #if split_type_list else "unknown",
+                    'train_indexes': X_pa_tr.index.tolist(),
+                    'test_indexes': X_pa_te.index.tolist(),
                     "TEST_PA_FRACTION": TEST_PA_FRACTION,
                     "AUC_PO_only": float(np.round(auc_po, 4)) if RUN_PO else np.nan,
                     "AUC_PA_only": float(np.round(auc_pa, 4)) if RUN_PA else np.nan,
@@ -845,7 +869,9 @@ def main():
     summary = pd.DataFrame(summary_rows)
     print("\n=== Summary (Average AUC on shared PA_test) ===")
     print(summary.to_string(index=False))
-    summary.to_csv('output/integration_analysis/summary.csv')
+    # make dir if not exists
+    os.makedirs('output/integration_analysis', exist_ok=True)
+    summary.to_csv('output/integration_analysis/summary_spatial_small_clusters.csv')
 
     elapsed = time() - start_time
     print(f"\nTotal execution time: {elapsed:.2f} seconds")

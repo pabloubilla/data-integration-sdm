@@ -21,7 +21,7 @@ from src.model_training import (
     train_loop,
     predict_logits,
     per_species_auc,
-    deepmaxent_model,
+    DeepMaxEntModel,
     deepmaxent_model_w_bias,
     deepmaxent_loss,
     deepmaxent_loss_w_bias,
@@ -157,7 +157,7 @@ def run_one_method(
     if model_type == "PO_Only":
         ds = SDMDataset(X=X_po_scaled[covs].values, Y=Y_po[species].values)
         loader = make_loader_xy(ds)
-        model = deepmaxent_model(len(covs), hidden_size, len(species), hidden_layers)
+        model = DeepMaxEntModel(len(covs), hidden_size, len(species), hidden_layers)
         loss_fn = deepmaxent_loss()
 
         train_loop(model, loader=loader, loss_fn=loss_fn, dataset=ds, train_cfg={**train_cfg, "model_type": model_type})
@@ -168,7 +168,7 @@ def run_one_method(
         
         ds = SDMDataset(X=X_po_scaled[covs].values, Y=Y_po[species].values)
         loader = make_loader_xy(ds)
-        model = deepmaxent_model(len(covs), hidden_size, len(species), hidden_layers)
+        model = DeepMaxEntModel(len(covs), hidden_size, len(species), hidden_layers)
         # deepmaxent_loss supports soft targets as you built
         loss_fn = BCEWithLogitsLoss()
 
@@ -186,7 +186,7 @@ def run_one_method(
 
         ds = SDMDataset(X=X_po_scaled[covs].values, Y=Y_po[species].values)
         loader = make_loader_xy(ds)
-        model = deepmaxent_model(len(covs), hidden_size, len(species), hidden_layers)
+        model = DeepMaxEntModel(len(covs), hidden_size, len(species), hidden_layers)
         # deepmaxent_loss supports soft targets as you built
         # loss_fn = BCEWithLogitsLoss()
         loss_fn = deepmaxent_loss()
@@ -204,7 +204,7 @@ def run_one_method(
 
         ds = SDMDataset(X=X_po_scaled[covs].values, Y=Y_po[species].values)
         loader = make_loader_xy(ds)
-        model = deepmaxent_model(len(covs), hidden_size, len(species), hidden_layers)
+        model = DeepMaxEntModel(len(covs), hidden_size, len(species), hidden_layers)
         # deepmaxent_loss supports soft targets as you built
         loss_fn = BCEWithLogitsLoss()
         # loss_fn = deepmaxent_loss()

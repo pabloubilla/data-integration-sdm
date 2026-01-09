@@ -19,7 +19,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import roc_auc_score
 
 # --- your models & loss
-from src.models import deepmaxent_model, deepmaxent_loss, deepmaxent_model_w_bias
+from src.models import DeepMaxEntModel, deepmaxent_loss, deepmaxent_model_w_bias
 
 
 # =========================
@@ -406,7 +406,7 @@ def main():
                     num_plots=num_plots
                 )
             else:
-                model = deepmaxent_model(
+                model = DeepMaxEntModel(
                     input_size=len(covs),
                     hidden_size=HIDDEN_SIZE,
                     output_size=len(species),

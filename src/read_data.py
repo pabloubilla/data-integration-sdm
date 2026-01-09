@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np
 import torch.nn as nn
-from src.models import deepmaxent_model, deepmaxent_loss
+from src.models import DeepMaxEntModel, deepmaxent_loss
 
 add_PO_var = True
 
@@ -37,7 +37,7 @@ scaler = StandardScaler().fit(X[covariates])
 X[covariates] = scaler.transform(X[covariates])
 X_test[covariates] = scaler.transform(X_test[covariates])
 
-deep_maxent = deepmaxent_model(input_size=len(covariates), 
+deep_maxent = DeepMaxEntModel(input_size=len(covariates), 
                                hidden_size=256, output_size=len(unique_species), hidden_nbr=3)
 
 # train the model

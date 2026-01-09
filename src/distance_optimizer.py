@@ -65,7 +65,7 @@ def optimize_cluster_split(D: np.ndarray, K: int):
 def minimize_cluster_split(
         D: np.ndarray,
         K: int,
-        target_min_distance: float | None = None,
+        target_min_distance = None,
         verbose: bool = True
 ):
     """

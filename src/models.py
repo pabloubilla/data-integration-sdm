@@ -10,12 +10,15 @@ class deepmaxent_loss(nn.Module):
         super(deepmaxent_loss, self).__init__()
     def forward(self, input, target):
         loss = -((target)*(input.log_softmax(0))).mean(0).mean()
+        # # apply softmax to target as well
+        # softmax_target = F.softmax(target, dim=0)
+        # loss = -((softmax_target)*(input.log_softmax(0))).mean(0).mean()
         return loss
 
 
 
 
-class deepmaxent_model(nn.Module):
+class DeepMaxEntModel(nn.Module):
     def __init__(self, input_size: int, hidden_size: int, output_size: int, hidden_nbr: int):
         super().__init__()
 
@@ -81,7 +84,7 @@ class SDMWithBias(nn.Module):
     Combines them to produce lambda: B x K
     """
     def __init__(self, n_species_covariates, n_species, n_bias_covariates,
-                 hidden_species=(128,64), hidden_bias=(64,), link="logadd"):
+                 hidden_species=(128,64), hidden_bias=(64,64), link="logadd"):
         super().__init__()
         self.species_head = MLP(n_species_covariates, n_species, hidden_species)
         self.bias_head    = MLP(n_bias_covariates, 1, hidden_bias)
@@ -91,9 +94,12 @@ class SDMWithBias(nn.Module):
         # Optional learnable global intercept per species
         # self.species_intercept = nn.Parameter(torch.zeros(1, n_species))
 
-    def forward(self, X, Z):
+    def forward(self, X, Z = None):
         S = self.species_head(X) #+ self.species_intercept  # B x K
-        b = self.bias_head(Z) 
+        if Z is not None:
+            b = self.bias_head(Z) 
+        else:
+            b = None
         
         return S, b                              # B x 1
 
@@ -109,15 +115,83 @@ class SDMWithBias(nn.Module):
             log_lambda = torch.log(lam + 1e-8)
             return lam, log_lambda
 
+# class deepmaxent_loss_w_bias(nn.Module):
+#     def __init__(self):
+#         super(deepmaxent_loss_w_bias, self).__init__()
+
+#     def forward(self, input1, input2, target):
+
+#         # Ensure positivity (softplus > 0)
+#         rate1 = F.softplus(input1)
+#         rate2 = F.softplus(input2)
+
+#         lam = rate1 * rate2 # + self.eps  # avoid log(0)
+
+#         # Negative log-likelihood (dropping log(y!))
+#         loss = (lam - target * torch.log(lam)).mean()
+#         return loss
+
+#         # loss = -((target)*(input1.log_softmax(0)+input2.log_softmax(0))).mean(0).mean()
+
+#         # loss = -((target)*(input1.log()+input2.log())).mean(0).mean()
+
+#         # loss = -((target)*(input1.softmax(0)*input2.softmax(0)).log()).mean(0).mean()
+#         return loss
+
+
 class deepmaxent_loss_w_bias(nn.Module):
-    def __init__(self):
-        super(deepmaxent_loss_w_bias, self).__init__()
+    def __init__(self, bias_l2=1e-4):
+        super().__init__()
+        self.bias_l2 = bias_l2
+        self.nll = nn.PoissonNLLLoss(log_input=True, full=False, reduction="mean")
+
     def forward(self, input1, input2, target):
-        loss = -((target)*(input1.log_softmax(0)+input2.log_softmax(0))).mean(0).mean()
-        # loss = -((target)*(input1.softmax(0)*input2.softmax(0)).log()).mean(0).mean()
-        return loss
+        # input1: log-base-rate (or a linear predictor for it)
+        # input2: log-bias from covariates
+        log_lam = input1 + input2
+
+        poisson = self.nll(log_lam, target)
+
+        # Regularize bias towards 0 => bias factor exp(input2) towards 1
+        reg = (input2 ** 2).mean()
+
+        return poisson + self.bias_l2 * reg
 
 
+
+
+class PoissonCountAndPresenceLoss(nn.Module):
+    def __init__(self, bias_l2=1e-4, pa_w=1.5, clamp_log_rate=(-10, 10)):
+        super().__init__()
+        self.bias_l2 = bias_l2
+        self.pa_w = pa_w
+        self.clamp_log_rate = clamp_log_rate
+        self.poisson = nn.PoissonNLLLoss(log_input=True, full=False, reduction="mean")
+
+    def forward(self, base_raw_po, base_raw_pa, bias_raw, yb_po, yb_pa):
+        # log-rates (raw NN outputs interpreted as log-rate components)
+        log_lambda_po = base_raw_po + bias_raw          # biased rate for Poisson counts
+        log_lambda_pa = base_raw_pa                     # separate rate for Bernoulli PA
+
+        if self.clamp_log_rate is not None:
+            log_lambda_po = log_lambda_po.clamp(*self.clamp_log_rate)
+            log_lambda_pa = log_lambda_pa.clamp(*self.clamp_log_rate)
+
+        # 1) Poisson count NLL using λ_po
+        loss_poisson = self.poisson(log_lambda_po, yb_po)
+
+        # 2) Bernoulli PA NLL using p = 1 - exp(-λ_pa)
+        lambda_pa = log_lambda_pa.exp()
+        log_p0 = -lambda_pa                                        # log P(pa=0)
+        log_p1 = torch.log(-torch.expm1(-lambda_pa) + 1e-12)       # log P(pa=1), stable
+
+        pa = yb_pa.to(log_lambda_pa.dtype)
+        loss_pa = -(pa * log_p1 + (1.0 - pa) * log_p0).mean()
+
+        # 3) regularize bias toward 0 => exp(bias) toward 1
+        loss_reg = (bias_raw ** 2).mean()
+
+        return loss_poisson + self.pa_w * loss_pa + self.bias_l2 * loss_reg
 
 # class deepmaxent_model(nn.Module):
 #     def __init__(self, input_size, hidden_size, output_size,hidden_nbr):

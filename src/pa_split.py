@@ -1405,13 +1405,40 @@ def partition_sweep_ranges(
     covs_distance: list,
     K_clusters: int = 50,
     select_subset: int = 20,
-    train_proportion = .4
+    train_proportion = .4,
+    distance_metric: str = 'mahalanobis',
 ):
+    
 
-    D = pairwise_distances(
-        X_pa[covs_distance].to_numpy(),
-        metric='mahalanobis'
-    )
+
+    X_matrix = X_pa[covs_distance].to_numpy()
+    # print(X_matrix.shape)
+    # print(X_matrix[:5, :])
+    # print(X_matrix.std(axis=0))
+    # print(covs_distance)
+
+    # --- compute ONE global VI (same metric everywhere) ---
+    C = np.cov(X_matrix.T)
+    VI = np.linalg.pinv(C)   # robust to singularity; or use inv(C + eps*I)
+
+    ## if any var has zero std, remove it
+    stds = X_matrix.std(axis=0)
+    zero_std_vars = [covs_distance[i] for i, s in enumerate(stds) if s < 1e-6]
+    if len(zero_std_vars) > 0:
+        print(f"Removing zero-std variables from distance covariates: {zero_std_vars}")
+        covs_distance = [c for c in covs_distance if c not in zero_std_vars]
+
+    if distance_metric == 'euclidean':
+        D = pairwise_distances(
+            X_pa[covs_distance].to_numpy(),
+            metric='euclidean'
+        )
+    elif distance_metric == 'mahalanobis':
+        D = pairwise_distances(
+            X_pa[covs_distance].to_numpy(),
+            metric='mahalanobis',
+            VI=VI
+        )
 
     # generate K clusters with size constrained
     n_samples = len(X_pa)
@@ -1420,7 +1447,7 @@ def partition_sweep_ranges(
         if select_subset > K_clusters:
             select_subset = K_clusters
 
-        print(f"Adjusted K_clusters to {K_clusters} due to small sample size.")
+    print(f"Adjusted K_clusters to {K_clusters} due to small sample size.")
     avg = n_samples / K_clusters
     min_size = np.floor(avg)
     max_size = np.ceil(avg)
@@ -1440,10 +1467,17 @@ def partition_sweep_ranges(
     # centroids calculation using covs_distance
     centroids = np.array([X_pa[covs_distance].iloc[labels == i].mean(axis=0) for i in range(K_clusters)])
     # distance between centroids
-    D_centroids = pairwise_distances(
-        centroids,
-        metric='mahalanobis'
-    )
+    if distance_metric == 'euclidean':
+        D_centroids = pairwise_distances(
+            centroids,
+            metric='euclidean'
+        )
+    elif distance_metric == 'mahalanobis':
+        D_centroids = pairwise_distances(
+            centroids,
+            metric='mahalanobis',
+            VI=VI
+        )
 
     unique_labels = np.unique(labels)
 
@@ -1480,11 +1514,151 @@ def partition_sweep_ranges(
             train_mask = np.isin(labels, train_ixs)
             A = np.where(test_mask)[0]
             B = np.where(train_mask)[0]
-            X_pa_tr = X_pa.iloc[B].reset_index(drop=True)
-            X_pa_te = X_pa.iloc[A].reset_index(drop=True)
-            Y_pa_tr = Y_pa.iloc[B].reset_index(drop=True)
-            Y_pa_te = Y_pa.iloc[A].reset_index(drop=True)
+            X_pa_tr = X_pa.iloc[B]
+            X_pa_te = X_pa.iloc[A]
+            Y_pa_tr = Y_pa.iloc[B]
+            Y_pa_te = Y_pa.iloc[A]
             d_metric = partition_distance(A, B, D)
+
+            splits.append((X_pa_tr, X_pa_te, Y_pa_tr, Y_pa_te, d_metric))
+            split_type_list.append((option, test_ix))
+            print(f"Cluster pair (test={test_ix}, train={train_ixs}): distance={d_metric}")
+
+    return splits, split_type_list
+
+
+### instead of clustering using directly the whole distance matrix
+def partition_sweep_ranges_v2(
+    X_pa: pd.DataFrame,
+    Y_pa: pd.DataFrame,
+    covs_cluster: list,
+    covs_distance: list,
+    K_clusters: int = 50,
+    select_subset: int = 20,
+    train_proportion = .4,
+    distance_metric: str = 'mahalanobis',
+):
+    
+
+
+    X_matrix = X_pa[covs_distance].to_numpy()
+    # print(X_matrix.shape)
+    # print(X_matrix[:5, :])
+    # print(X_matrix.std(axis=0))
+    # print(covs_distance)
+
+    # --- compute ONE global VI (same metric everywhere) ---
+    C = np.cov(X_matrix.T)
+    VI = np.linalg.pinv(C)   # robust to singularity; or use inv(C + eps*I)
+
+    ## if any var has zero std, remove it
+    stds = X_matrix.std(axis=0)
+    zero_std_vars = [covs_distance[i] for i, s in enumerate(stds) if s < 1e-6]
+    if len(zero_std_vars) > 0:
+        print(f"Removing zero-std variables from distance covariates: {zero_std_vars}")
+        covs_distance = [c for c in covs_distance if c not in zero_std_vars]
+
+    if distance_metric == 'euclidean':
+        D = pairwise_distances(
+            X_pa[covs_distance].to_numpy(),
+            metric='euclidean'
+        )
+    elif distance_metric == 'mahalanobis':
+        D = pairwise_distances(
+            X_pa[covs_distance].to_numpy(),
+            metric='mahalanobis',
+            VI=VI
+        )
+
+    # generate K clusters with size constrained
+    n_samples = len(X_pa)
+    if n_samples / K_clusters < 10:
+        K_clusters = n_samples // 10
+        if select_subset > K_clusters:
+            select_subset = K_clusters
+
+    print(f"Adjusted K_clusters to {K_clusters} due to small sample size.")
+    avg = n_samples / K_clusters
+    min_size = np.floor(avg)
+    max_size = np.ceil(avg)
+
+    print(f"Generating {K_clusters} clusters with sizes in [{min_size}, {max_size}]")
+    kmeans = KMeansConstrained(
+        n_clusters=K_clusters,
+        size_min=min_size,
+        size_max=max_size,
+        random_state=42,
+        n_init=10,
+    )
+
+    X_coords = X_pa[covs_cluster].to_numpy()
+    labels = kmeans.fit_predict(X_coords)
+
+    # centroids calculation using covs_distance
+    centroids = np.array([X_pa[covs_distance].iloc[labels == i].mean(axis=0) for i in range(K_clusters)])
+    # distance between centroids
+    if distance_metric == 'euclidean':
+        D_centroids = pairwise_distances(
+            centroids,
+            metric='euclidean'
+        )
+        # for every point compute the distance to each centroid
+        D_centroids_to_points = pairwise_distances(
+            centroids,
+            X_pa[covs_distance].to_numpy(),
+            metric='euclidean'
+        )
+    elif distance_metric == 'mahalanobis':
+        D_centroids = pairwise_distances(
+            centroids,
+            metric='mahalanobis',
+            VI=VI
+        )
+
+    unique_labels = np.unique(labels)
+
+    splits = []
+    split_type_list = []
+
+    # select subset of unique labels to reduce number of splits (these are for test, at random)
+    selected_labels = np.random.choice(unique_labels, size=select_subset, replace=False)
+
+    clusters_in_train = int(K_clusters * train_proportion)
+    print(f"Using {clusters_in_train} clusters in train set.")
+    
+    n_points = len(X_pa)  
+    for test_ix in selected_labels:
+        # select the closests clusters to test_ix to form train set using D_centroids
+        dists_to_test = D_centroids_to_points[test_ix].copy()
+        # dists_to_test[test_ix] = np.inf  # ignore self-distance
+
+        # one with the closests clusters_in_train, one with the middle clusters_in_train, one with the farthest clusters_in_train
+        for option in ['closest', 'middle', 'farthest']:
+            if option == 'closest':
+                # select from 0 to train_proportion the closest clusters
+                train_ixs = np.argsort(dists_to_test)[:int(n_points * train_proportion)]
+
+            elif option == 'middle':
+                sorted_ixs = np.argsort(dists_to_test)
+                start_ix = (n_points - int(n_points * train_proportion)) // 2
+                train_ixs = sorted_ixs[start_ix:start_ix + int(n_points * train_proportion)]
+            elif option == 'farthest':
+                sorted_ixs = np.argsort(dists_to_test)[::-1]
+                train_ixs = sorted_ixs[:int(n_points * train_proportion)]
+            
+            # remove test_ix from train_ixs if present
+            # train_ixs = train_ixs[train_ixs != test_ix]
+
+            test_mask = (labels == test_ix)
+            train_mask = np.isin(np.arange(n_points), train_ixs)
+            A = np.where(test_mask)[0]
+            B = np.where(train_mask)[0]
+            X_pa_tr = X_pa.iloc[B]
+            X_pa_te = X_pa.iloc[A]
+            Y_pa_tr = Y_pa.iloc[B]
+            Y_pa_te = Y_pa.iloc[A]
+            d_metric = partition_distance(A, B, D)
+
             splits.append((X_pa_tr, X_pa_te, Y_pa_tr, Y_pa_te, d_metric))
             split_type_list.append((option, test_ix))
             print(f"Cluster pair (test={test_ix}, train={train_ixs}): distance={d_metric}")
@@ -1493,8 +1667,9 @@ def partition_sweep_ranges(
 
 
 
+
     return splits, split_type_list
-  
+
     
 if __name__ == '__main__':
 

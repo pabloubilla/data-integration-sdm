@@ -4,3 +4,5 @@ output/
 quarto/
 presentation/
 myenv/
+test_code/
+.venv/

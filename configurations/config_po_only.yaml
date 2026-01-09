@@ -23,12 +23,12 @@ train_defaults:
   print_every: 20
 
 regions:
-  "AWT": ["_plant", "_bird"]
-  "CAN": [""]
-  "NSW": ["_bat", "_bird", "_plant", "_reptile"]
-  # "NSW": ["_reptile"] # review case with high epochs, nan for abn
-  "NZ": [""]        
-  "SA" : [""]
+  # "AWT": ["_plant", "_bird"]
+  # "CAN": [""]
+  # "NSW": ["_bat", "_bird", "_plant", "_reptile"]
+  # # "NSW": ["_reptile"] # review case with high epochs, nan for abn
+  # "NZ": [""]        
+  # "SA" : [""]
   "SWI": [""]
 
 experiments:

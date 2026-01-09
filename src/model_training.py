@@ -8,7 +8,7 @@ from typing import Dict, List, Optional, Sequence
 
 from src.load_data import load_po_pa_nceas
 from src.utils import scale_features
-from src.models import (deepmaxent_model, deepmaxent_loss, 
+from src.models import (DeepMaxEntModel, deepmaxent_loss, 
                         deepmaxent_model_w_bias, deepmaxent_loss_w_bias, 
                         SDMWithBias, sdm_model_abn, sdm_loss_abn)
 
@@ -160,7 +160,7 @@ def smooth_targets_v2(y_true: torch.Tensor, logits: torch.Tensor, beta) -> torch
 """
 Version with the adjustment using Bayes for the smooth targets (makes more sense probably)
 """
-def smooth_targets_v3(y_true: torch.Tensor, logits: torch.Tensor, beta) -> torch.Tensor:
+def smooth_targets_v3(y_true: torch.Tensor, logits: torch.Tensor, theta) -> torch.Tensor:
     """
     y_true: (B,) or (B,S)  binary labels
     logits: same shape as y_true
@@ -171,14 +171,14 @@ def smooth_targets_v3(y_true: torch.Tensor, logits: torch.Tensor, beta) -> torch
 
     with torch.no_grad():
         p = torch.sigmoid(logits)
-        if not torch.is_tensor(beta):
-            beta = torch.as_tensor(beta, dtype=y_true.dtype, device=y_true.device)
-        beta = beta.to(y_true.device, y_true.dtype)
-        beta = beta if beta.ndim else beta.expand_as(y_true)              # scalar -> (B,S)
-        if beta.ndim == 1:                                                # (S,) -> (B,S)
-            beta = beta[None, :].expand_as(y_true)
+        if not torch.is_tensor(theta):
+            theta = torch.as_tensor(theta, dtype=y_true.dtype, device=y_true.device)
+        theta = theta.to(y_true.device, y_true.dtype)
+        theta = theta if theta.ndim else theta.expand_as(y_true)              # scalar -> (B,S)
+        if theta.ndim == 1:                                                # (S,) -> (B,S)
+            theta = theta[None, :].expand_as(y_true)
 
-    smooth_targets = torch.where(y_true > 0, y_true, p*(1-beta)/(1 - p + p*(1-beta)))
+    smooth_targets = torch.where(y_true > 0, y_true, p*(theta/(1 - p + p*(theta))))
 
     return smooth_targets
 
@@ -475,7 +475,7 @@ if __name__ == '__main__':
     train_config['model_type'] = 'PO_Only'
     ds = SDMDataset(X = X_po_scaled[covs].values, Y = Y_po[species].values)
     loader = DataLoader(ds, train_config['bs'], shuffle=True)
-    model = deepmaxent_model(len(covs), train_config['hidden_size'], len(species), train_config['hidden_layers'])
+    model = DeepMaxEntModel(len(covs), train_config['hidden_size'], len(species), train_config['hidden_layers'])
     train_loop(model, loader=loader, loss_fn=deepmaxent_loss(), train_cfg=train_config)
 
     logits = predict_logits(model, X_pa_scaled[covs].values,
@@ -490,7 +490,7 @@ if __name__ == '__main__':
     train_config['model_type'] = 'PO_Only_Smooth'
     ds = SDMDataset(X = X_po_scaled[covs].values, Y = Y_po[species].values)
     loader = DataLoader(ds, train_config['bs'], shuffle=True)
-    model = deepmaxent_model(len(covs), train_config['hidden_size'], len(species), train_config['hidden_layers'])
+    model = DeepMaxEntModel(len(covs), train_config['hidden_size'], len(species), train_config['hidden_layers'])
     train_loop(model, loader=loader, loss_fn=deepmaxent_loss(), train_cfg=train_config)
 
     logits = predict_logits(model, X_pa_scaled[covs].values,

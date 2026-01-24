@@ -6,3 +6,6 @@ presentation/
 myenv/
 test_code/
 .venv/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/

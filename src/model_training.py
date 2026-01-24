@@ -8,9 +8,9 @@ from typing import Dict, List, Optional, Sequence
 
 from src.load_data import load_po_pa_nceas
 from src.utils import scale_features
-from src.models import (DeepMaxEntModel, deepmaxent_loss, 
-                        deepmaxent_model_w_bias, deepmaxent_loss_w_bias, 
-                        SDMWithBias, sdm_model_abn, sdm_loss_abn)
+from src.models import (DeepMaxEntModel, DeepMaxEntLoss, 
+                        DeepMaxEntPlotBias, deepmaxent_loss_w_bias, 
+                        SDMWithBias, ABNModel, ABNLoss)
 
 from torch.nn import BCEWithLogitsLoss
 
@@ -476,7 +476,7 @@ if __name__ == '__main__':
     ds = SDMDataset(X = X_po_scaled[covs].values, Y = Y_po[species].values)
     loader = DataLoader(ds, train_config['bs'], shuffle=True)
     model = DeepMaxEntModel(len(covs), train_config['hidden_size'], len(species), train_config['hidden_layers'])
-    train_loop(model, loader=loader, loss_fn=deepmaxent_loss(), train_cfg=train_config)
+    train_loop(model, loader=loader, loss_fn=DeepMaxEntLoss(), train_cfg=train_config)
 
     logits = predict_logits(model, X_pa_scaled[covs].values,
                             model_type='PO_Only', device=None)
@@ -491,7 +491,7 @@ if __name__ == '__main__':
     ds = SDMDataset(X = X_po_scaled[covs].values, Y = Y_po[species].values)
     loader = DataLoader(ds, train_config['bs'], shuffle=True)
     model = DeepMaxEntModel(len(covs), train_config['hidden_size'], len(species), train_config['hidden_layers'])
-    train_loop(model, loader=loader, loss_fn=deepmaxent_loss(), train_cfg=train_config)
+    train_loop(model, loader=loader, loss_fn=DeepMaxEntLoss(), train_cfg=train_config)
 
     logits = predict_logits(model, X_pa_scaled[covs].values,
                             model_type='PO_Only_Smooth', device=None)
@@ -504,7 +504,7 @@ if __name__ == '__main__':
     ds = SDMDataset(X = X_po_scaled[covs].values, Y = Y_po[species].values,
                     I = np.arange(len(X_po_scaled)))
     loader = DataLoader(ds, train_config['bs'], shuffle=True)
-    model = deepmaxent_model_w_bias(len(covs), train_config['hidden_size'], len(species),
+    model = DeepMaxEntPlotBias(len(covs), train_config['hidden_size'], len(species),
                                     train_config['hidden_layers'], num_plots=len(X_po_scaled), separate=False)
     # you used BCE here; keep it if that's intentional
     train_loop(model, loader=loader, loss_fn=BCEWithLogitsLoss(), train_cfg=train_config)
@@ -521,7 +521,7 @@ if __name__ == '__main__':
     ds = SDMDataset(X = X_po_scaled[covs].values, Y = Y_po[species].values,
                     I = np.arange(len(X_po_scaled)))
     loader = DataLoader(ds, train_config['bs'], shuffle=True)
-    model = deepmaxent_model_w_bias(len(covs), train_config['hidden_size'], len(species),
+    model = DeepMaxEntPlotBias(len(covs), train_config['hidden_size'], len(species),
                                     train_config['hidden_layers'], num_plots=len(X_po_scaled), separate=True)
     train_loop(model, loader=loader, loss_fn=deepmaxent_loss_w_bias(), train_cfg=train_config)
 

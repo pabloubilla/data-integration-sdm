@@ -4,7 +4,7 @@
 
 import os
 import random
-from typing import List, Tuple, Dict
+from typing import List, Tuple, Dict, Optional
 from time import time
 
 import numpy as np
@@ -27,7 +27,7 @@ from sklearn.cluster import KMeans
 from sklearn.metrics import pairwise_distances
 
 # --- your models & loss
-from src.models import DeepMaxEntModel, deepmaxent_loss, deepmaxent_model_w_bias
+from src.models import DeepMaxEntModel, DeepMaxEntLoss, DeepMaxEntPlotBias, SDMWithBias, PoissonCountAndPresenceLoss
 import src.pa_split as pa_split
 from src.model_training import smooth_targets_v3
 
@@ -76,6 +76,7 @@ RUN_PA = True
 RUN_POPA, ADD_INTERACTIONS = True, False
 RUN_POPA_SMOOTHED = True
 RUN_POPA_ENSEMBLE = True
+RUN_POPA_BIAS = True
 
 
 # =========================
@@ -142,7 +143,7 @@ def build_model(input_size: int, output_size: int, bias: bool, num_plots = None)
     if bias:
         if num_plots is None:
             raise ValueError("num_plots required for bias model.")
-        return deepmaxent_model_w_bias(
+        return DeepMaxEntPlotBias(
             input_size=input_size,
             hidden_size=HIDDEN_SIZE,
             output_size=output_size,
@@ -174,7 +175,7 @@ def train_model(
     if criterion == 'bce':
         loss_f = torch.nn.BCEWithLogitsLoss()
     elif criterion == 'deepmaxent':
-        loss_f = deepmaxent_loss()
+        loss_f = DeepMaxEntLoss()
 
     model.train()
     for epoch in range(1, epochs + 1):
@@ -209,12 +210,17 @@ def train_model(
 
 
 
+
 @torch.no_grad()
-def predict(model: nn.Module, X: np.ndarray, dev: torch.device = None) -> np.ndarray:
+def predict(model: nn.Module, X: np.ndarray, dev: Optional[torch.device] = None,
+            bias_model: bool = False) -> np.ndarray:
     dev = dev or device()
     model.eval()
     X_t = torch.tensor(X, dtype=torch.float32, device=dev)
-    outputs = model(X_t, None) if BIAS_MODEL else model(X_t)
+    if bias_model:
+        outputs, _ = model(X_t, None)
+    else:
+        outputs = model(X_t)
     return outputs.detach().cpu().numpy()
 
 def per_species_auc(y_true: pd.DataFrame, y_score: np.ndarray, species: List[str]) -> Dict[str, float]:
@@ -454,6 +460,150 @@ def run_experiment_popa(
     return avg_auc, aucs, model_path, scaler_path
 
 
+def run_experiment_popa_bias(
+    name: str,
+    X_po_df: pd.DataFrame, Y_po_df: pd.DataFrame,
+    X_pa_tr_df: pd.DataFrame, Y_pa_tr_df: pd.DataFrame,
+    X_pa_te_df: pd.DataFrame, Y_pa_te_df: pd.DataFrame,
+    covs: List[str], covs_bias: List[str], species: List[str],
+    output_dir: str, region: str, group: str,
+    epochs: int = 300, lr: float = 1e-4,
+    batch_size: int = 256, w_po: float = .5, w_pa: float = .5,
+):
+    os.makedirs(output_dir, exist_ok=True)
+    scaler_path = os.path.join(output_dir, f"scaler_{name}_{region}{group}.pkl")
+
+    # scale (fit on combo PO + PA train)
+    scaler = StandardScaler().fit(
+        pd.concat([X_po_df[covs], X_pa_tr_df[covs]], axis=0)
+    )
+    scaler_bias = StandardScaler().fit(
+        pd.concat([X_po_df[covs_bias], X_pa_tr_df[covs_bias]], axis=0)
+    )
+
+    X_po_s = X_po_df.copy()
+    X_pa_tr_s = X_pa_tr_df.copy()
+    X_pa_te_s = X_pa_te_df.copy()
+    X_po_s[covs] = scaler.transform(X_po_s[covs]) 
+    X_pa_tr_s[covs] = scaler.transform(X_pa_tr_s[covs])
+    X_pa_te_s[covs] = scaler.transform(X_pa_te_s[covs])
+
+    X_po_s_bias = X_po_df.copy()
+    X_po_s_bias[covs_bias] = scaler_bias.transform(X_po_s_bias[covs_bias])
+    X_pa_tr_s_bias = X_pa_tr_df.copy()
+    X_pa_tr_s_bias[covs_bias] = scaler_bias.transform(X_pa_tr_s_bias[covs_bias])
+    X_pa_te_s_bias = X_pa_te_df.copy()
+    X_pa_te_s_bias[covs_bias] = scaler_bias.transform(X_pa_te_s_bias[covs_bias])
+
+    batch_size = min(batch_size, int(len(X_pa_tr_s) * MAX_BATCH_PERCENTAGE))
+
+   
+
+    # model = deepmaxent_model(input_size=len(covs), hidden_size=HIDDEN_SIZE, output_size=len(species), hidden_nbr=HIDDEN_LAYERS)
+
+    model = SDMWithBias(
+        n_species_covariates=len(covs),
+        n_species=len(species),
+        n_bias_covariates=len(covs_bias),
+        hidden_species=(128, 64),
+        hidden_bias=(500, 250),
+        link="logadd"
+    )
+
+    # criterion_species = deepmaxent_loss()
+
+    # loaders separately (proportional sizes)
+    proportion_po = len(X_po_s) / (len(X_po_s) + len(X_pa_tr_s))
+    proportion_pa = len(X_pa_tr_s) / (len(X_po_s) + len(X_pa_tr_s))
+    batch_size_po = max(1, int(batch_size*proportion_po))
+    batch_size_pa = max(1, int(batch_size*proportion_pa))
+    print('Batch for PO: ', batch_size_po)
+    print('Batch for PA: ', batch_size_pa)
+    # po_ds = XYDataset(X_po_s[covs].values.astype(np.float32), Y_po_df[species].values.astype(np.float32))
+    po_ds = XZYDataset(X_po_s[covs].values.astype(np.float32), X_po_s_bias[covs_bias].values.astype(np.float32), Y_po_df[species].values.astype(np.float32))
+    pa_ds = XYDataset(X_pa_tr_s[covs].values.astype(np.float32), Y_pa_tr_df[species].values.astype(np.float32))
+    po_loader = DataLoader(po_ds, batch_size=batch_size_po, shuffle=True, drop_last=False)
+    pa_loader = DataLoader(pa_ds, batch_size=batch_size_pa, shuffle=True, drop_last=False)
+
+
+
+    def train_popa_model_bias(
+        model: nn.Module,
+        po_loader: DataLoader,
+        pa_loader: DataLoader,
+        po_ds: Dataset,
+        pa_ds: Dataset,
+        criterion_species: nn.Module,
+        epochs: int = 300,
+        lr: float = 1e-4,
+        dev: Optional[torch.device] = None,
+        w_po: float = .5,
+        w_pa: float = .5,
+    ):
+        dev = dev or device()
+        model.to(dev)
+        optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=3e-4)
+        # criterion_po = deepmaxent_loss()
+
+        # criterion_pa = deepmaxent_loss()#torch.nn.BCEWithLogitsLoss()
+
+        model.train()
+        loss_fn = PoissonCountAndPresenceLoss()
+        for epoch in range(1, epochs + 1):
+            running_loss = 0.0
+            for (xb_po, zb_po, yb_po), (xb_pa, yb_pa, _) in zip(po_loader, pa_loader):
+                xb_po = xb_po.to(dev)
+                zb_po = zb_po.to(dev)
+                yb_po = yb_po.to(dev)
+                xb_pa = xb_pa.to(dev)
+                yb_pa = yb_pa.to(dev)
+
+                optimizer.zero_grad()
+
+                score_po, bias_pred_po = model(xb_po, zb_po)
+                score_pa, _ = model(xb_pa)
+
+
+                loss = loss_fn(score_po, score_pa, bias_pred_po, yb_po, yb_pa)
+
+                loss.backward()
+                optimizer.step()
+                running_loss += loss.item() * (xb_po.size(0) + xb_pa.size(0))
+
+
+    # for loss use BCE
+    loss_fn = None
+
+    train_popa_model_bias(
+        model=model,
+        po_loader=po_loader,
+        pa_loader=pa_loader,
+        po_ds=po_ds,
+        pa_ds=pa_ds,
+        criterion_species=loss_fn,
+        epochs=epochs,
+        lr=lr,
+        dev=device(),
+        w_po=w_po,
+        w_pa=w_pa
+    )
+
+    # evaluate on PA_test
+    X_te_np = X_pa_te_s[covs].values.astype(np.float32)
+    scores = predict(model, X_te_np, dev=device(), bias_model=True)
+    aucs = per_species_auc(Y_pa_te_df[species], scores, species)
+    avg_auc = np.nanmean(list(aucs.values()))
+
+    # aucs_site = per_site_auc(Y_pa_te_df[species], scores)
+    # avg_auc_site = np.nanmean(list(aucs_site.values()))
+
+
+
+
+    # model_path = os.path.join(output_dir, f"deepmaxent_DA_{region}{group}.pt")
+    # torch.save(model, model_path)
+    model_path = None
+    return avg_auc, aucs, model_path, scaler_path
 
 def run_experiment_popa_ensemble(
     name: str,
@@ -715,8 +865,12 @@ def main():
 
  
             # # spatial case, only use xy for partitioning and distance
+            # pa_splits, split_type_list = pa_split.partition_sweep_ranges(
+            #     X_pa_s, Y_pa, covs_xy, covs_xy, K_clusters=100, select_subset=10, train_proportion=.4, distance_metric='euclidean')
+            
+
             pa_splits, split_type_list = pa_split.partition_sweep_ranges(
-                X_pa_s, Y_pa, covs_xy, covs_xy, K_clusters=100, select_subset=10, train_proportion=.4, distance_metric='euclidean')
+                X_pa_s, Y_pa, covs, covs, K_clusters=100, select_subset=10, train_proportion=.4, distance_metric='mahalanobis')
 
 
             for split_id, (X_pa_tr, X_pa_te, Y_pa_tr, Y_pa_te, d_metric) in enumerate(pa_splits):
@@ -816,6 +970,29 @@ def main():
                     )
                     print(f"[PO+PA Smooth] Average AUC on PA_test: {auc_mix_smooth:.4f}")   
 
+                if RUN_POPA_BIAS:
+                    
+                    covs_to_use = covs + (['PO'] if ADD_PO_VAR else [])
+                    covs_bias = covs_xy  # bias covariates
+
+                    auc_mix_bias, aucs_mix_bias, model_mix_bias, scaler_mix_bias = run_experiment_popa_bias(
+                        name="PO_plus_PA_bias",
+                        X_po_df=X_po_s,
+                        Y_po_df=Y_po,
+                        X_pa_tr_df=X_pa_tr,
+                        Y_pa_tr_df=Y_pa_tr,
+                        X_pa_te_df=X_pa_te,
+                        Y_pa_te_df=Y_pa_te,
+                        covs=covs_to_use, covs_bias=covs_bias, species=species,
+                        output_dir=exp_dir, region=region, group=group,
+                        epochs=EPOCHS,
+                        lr=LR,
+                        batch_size=BATCH_SIZE,
+                        w_po=0.5,
+                        w_pa=0.5
+                    )
+                    print(f"[PO+PA Bias] Average AUC on PA_test: {auc_mix_bias:.4f}")
+
                 if RUN_POPA_ENSEMBLE:
                     auc_mix_ens, aucs_mix_ens, model_mix_ens, scaler_mix_ens = run_experiment_popa_ensemble(
                         name="PO_plus_PA_ens",
@@ -851,21 +1028,30 @@ def main():
                     "AUC_PO_plus_PA": float(np.round(auc_mix, 4)) if RUN_POPA else np.nan,
                     "AUC_PO_plus_PA_smooth": float(np.round(auc_mix_smooth, 4)) if RUN_POPA_SMOOTHED else np.nan,
                     "AUC_PO_plus_PA_ens": float(np.round(auc_mix_ens, 4)) if RUN_POPA_ENSEMBLE else np.nan,
+                    "AUC_PO_plus_PA_bias": float(np.round(auc_mix_bias, 4)) if RUN_POPA_BIAS else np.nan,
                 }
 
                 summary_rows.append(row_info)
 
                 # detailed per-species
                 for sp in species:
-                    detailed_row = row_info.copy()
-                    detailed_row.update({
+                    detailed_row = {
+                        "region": region,
+                        "group": group or "(all)",
+                        "split_id": split_id,
+                        "train_test_dist": d_metric,
+                        "split_type": split_type_list[split_id][0], #if split_type_list
+                        "test_id": split_type_list[split_id][1], #if split_type_list else "unknown",
+                        'train_indexes': X_pa_tr.index.tolist(),
+                        'test_indexes': X_pa_te.index.tolist(),
                         "species": sp,
                         "AUC_PO_only_sp": float(np.round(aucs_po[sp], 4)) if RUN_PO else np.nan,
                         "AUC_PA_only_sp": float(np.round(aucs_pa[sp], 4)) if RUN_PA else np.nan,
                         "AUC_PO_plus_PA_sp": float(np.round(aucs_mix[sp], 4)) if RUN_POPA else np.nan,
                         "AUC_PO_plus_PA_smooth_sp": float(np.round(aucs_mix_smooth[sp], 4)) if RUN_POPA_SMOOTHED else np.nan,
                         "AUC_PO_plus_PA_ens_sp": float(np.round(aucs_mix_ens[sp], 4)) if RUN_POPA_ENSEMBLE else np.nan,
-                    })
+                        "AUC_PO_plus_PA_bias_sp": float(np.round(aucs_mix_bias[sp], 4)) if RUN_POPA_BIAS else np.nan,
+                    }
                     detailed_summary.append(detailed_row)
 
                 # make summary per species as well
@@ -875,12 +1061,12 @@ def main():
     print(summary.to_string(index=False))
     # make dir if not exists
     # os.makedirs('output/integration_analysis', exist_ok=True)
-    summary_path = os.path.join(output_root, 'partition_results.csv')
-    summary.to_csv(summary_path, index=False)
-    print(f"\nSummary saved to: {summary_path}")
+    # summary_path = os.path.join(output_root, 'partition_results_spatial.csv')
+    # summary.to_csv(summary_path, index=False)
+    # print(f"\nSummary saved to: {summary_path}")
 
     detailed_summary_df = pd.DataFrame(detailed_summary)
-    detailed_summary_path = os.path.join(output_root, 'partition_results_detailed.csv')
+    detailed_summary_path = os.path.join(output_root, 'partition_results_detailed_covariates.csv')
     detailed_summary_df.to_csv(detailed_summary_path, index=False)
     print(f"Detailed summary saved to: {detailed_summary_path}")
 

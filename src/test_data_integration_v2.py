@@ -28,7 +28,7 @@ from sklearn.cluster import KMeans
 from src.model_training import smooth_targets_v3
 
 # --- your models & loss
-from src.models import DeepMaxEntModel, deepmaxent_loss, deepmaxent_model_w_bias, deepmaxent_domain, grad_reverse, DomainDiscriminator, DeepMaxentTwoHead, SDMWithBias, deepmaxent_loss_w_bias, PoissonCountAndPresenceLoss
+from src.models import DeepMaxEntModel, DeepMaxEntLoss, DeepMaxEntPlotBias, deepmaxent_domain, grad_reverse, DomainDiscriminator, DeepMaxentTwoHead, SDMWithBias, deepmaxent_loss_w_bias, PoissonCountAndPresenceLoss
 
 
 # NEW: TabPFN
@@ -159,7 +159,7 @@ def build_model(input_size: int, output_size: int, bias: bool, num_plots: Option
     if bias:
         if num_plots is None:
             raise ValueError("num_plots required for bias model.")
-        return deepmaxent_model_w_bias(
+        return DeepMaxEntPlotBias(
             input_size=input_size,
             hidden_size=HIDDEN_SIZE,
             output_size=output_size,
@@ -191,7 +191,7 @@ def train_model(
     if criterion == 'bce':
         loss_f = torch.nn.BCEWithLogitsLoss()
     elif criterion == 'deepmaxent':
-        loss_f = deepmaxent_loss()
+        loss_f = DeepMaxEntLoss()
 
     model.train()
     for epoch in range(1, epochs + 1):
@@ -1028,7 +1028,7 @@ def run_experiment_popa(
    
 
     model = DeepMaxEntModel(input_size=len(covs), hidden_size=HIDDEN_SIZE, output_size=len(species), hidden_nbr=HIDDEN_LAYERS)
-    criterion_species = deepmaxent_loss()
+    criterion_species = DeepMaxEntLoss()
 
     # loaders separately (proportional sizes)
     proportion_po = len(X_po_s) / (len(X_po_s) + len(X_pa_tr_s))
@@ -1057,8 +1057,8 @@ def run_experiment_popa(
         model.to(dev)
         optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=3e-4)
 
-        criterion_po = deepmaxent_loss()
-        criterion_pa = deepmaxent_loss()#torch.nn.BCEWithLogitsLoss()
+        criterion_po = DeepMaxEntLoss()
+        criterion_pa = DeepMaxEntLoss()#torch.nn.BCEWithLogitsLoss()
 
         model.train()
         for epoch in range(1, epochs + 1):

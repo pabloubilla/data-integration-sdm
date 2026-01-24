@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np
 import torch.nn as nn
-from src.models import DeepMaxEntModel, deepmaxent_loss
+from src.models import DeepMaxEntModel, DeepMaxEntLoss
 
 add_PO_var = True
 
@@ -41,7 +41,7 @@ deep_maxent = DeepMaxEntModel(input_size=len(covariates),
                                hidden_size=256, output_size=len(unique_species), hidden_nbr=3)
 
 # train the model
-criterion = deepmaxent_loss()
+criterion = DeepMaxEntLoss()
 import torch
 optimizer = torch.optim.Adam(deep_maxent.parameters(), lr=0.0001)
 

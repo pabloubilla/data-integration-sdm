@@ -20,7 +20,7 @@ from sklearn.metrics import roc_auc_score
 from sklearn.linear_model import LogisticRegression
 
 # --- your models & loss
-from src.models import DeepMaxEntModel, deepmaxent_loss, deepmaxent_model_w_bias, deepmaxent_domain, grad_reverse, DomainDiscriminator, DeepMaxentTwoHead
+from src.models import DeepMaxEntModel, DeepMaxEntLoss, DeepMaxEntPlotBias, deepmaxent_domain, grad_reverse, DomainDiscriminator, DeepMaxentTwoHead
 
 # =========================
 # Config
@@ -199,7 +199,7 @@ def build_model(input_size: int, output_size: int, bias: bool, num_plots: int | 
     if bias:
         if num_plots is None:
             raise ValueError("num_plots required for bias model.")
-        return deepmaxent_model_w_bias(
+        return DeepMaxEntPlotBias(
             input_size=input_size,
             hidden_size=HIDDEN_SIZE,
             output_size=output_size,
@@ -331,7 +331,7 @@ def run_experiment_da(
     pa_loader = make_loader(X_pa_tr_s, Y_pa_tr_df, covs, species, batch_size=batch_size, shuffle=True, drop_last=True)
 
     model = deepmaxent_domain(input_size=len(covs), hidden_size=HIDDEN_SIZE, output_size=len(species), hidden_nbr=HIDDEN_LAYERS)
-    criterion_species = deepmaxent_loss()
+    criterion_species = DeepMaxEntLoss()
 
     # train (with PA validation)
     X_val_np = X_pa_val_s[covs].values.astype(np.float32)
@@ -509,7 +509,7 @@ def run_experiment(
 
     # model
     model = build_model(input_size=len(covs), output_size=len(species), bias=BIAS_MODEL, num_plots=len(X_tr))
-    criterion = deepmaxent_loss()
+    criterion = DeepMaxEntLoss()
 
     # train
     train_model(
@@ -640,7 +640,7 @@ def run_experiment_transfer(
     ).to(device())
     dev = device()
     # losses
-    loss_po = deepmaxent_loss()           # your PO (DeepMaxEnt) loss possibly expects probs
+    loss_po = DeepMaxEntLoss()           # your PO (DeepMaxEnt) loss possibly expects probs
     loss_pa = nn.BCEWithLogitsLoss()      # standard for PA fine-tune (logits)
 
     # --- PRETRAIN on PO
@@ -878,7 +878,7 @@ def run_experiment_twohead(
     model = DeepMaxentTwoHead(
         input_size=len(covs), hidden_size=HIDDEN_SIZE, output_size=len(species), hidden_nbr=HIDDEN_LAYERS
     )
-    criterion_species = deepmaxent_loss()
+    criterion_species = DeepMaxEntLoss()
 
     # train (validate on PA)
     X_val_np = X_pa_val_s[covs].values.astype(np.float32)

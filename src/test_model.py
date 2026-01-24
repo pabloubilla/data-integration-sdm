@@ -19,7 +19,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import roc_auc_score
 
 # --- your models & loss
-from src.models import DeepMaxEntModel, deepmaxent_loss, deepmaxent_model_w_bias
+from src.models import DeepMaxEntModel, DeepMaxEntLoss, DeepMaxEntPlotBias
 
 
 # =========================
@@ -398,7 +398,7 @@ def main():
             # Model / loss
             if BIAS_MODEL:
                 num_plots = len(X_train)  # assuming each row is a unique plot
-                model = deepmaxent_model_w_bias(
+                model = DeepMaxEntPlotBias(
                     input_size=len(covs),
                     hidden_size=HIDDEN_SIZE,
                     output_size=len(species),
@@ -412,7 +412,7 @@ def main():
                     output_size=len(species),
                     hidden_nbr=HIDDEN_LAYERS
                 )
-            criterion = deepmaxent_loss()
+            criterion = DeepMaxEntLoss()
 
             # Train
             save_model_path = os.path.join(model_folder, f"deepmaxent_{region}{group}_model.pt")

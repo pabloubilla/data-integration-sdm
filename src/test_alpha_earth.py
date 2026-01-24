@@ -37,7 +37,7 @@ from sklearn.preprocessing import StandardScaler
 
 from src.load_data import load_po_pa_nceas
 from src.utils import split_pa_train_test_spatially, scale_features
-from src.models import DeepMaxEntModel, deepmaxent_loss
+from src.models import DeepMaxEntModel, DeepMaxEntLoss
 
 
 # ============================================================
@@ -149,7 +149,7 @@ def train_model(model: nn.Module, train_loader: DataLoader, criterion: str, epoc
     if criterion == "bce":
         loss_f = torch.nn.BCEWithLogitsLoss()
     elif criterion == "deepmaxent":
-        loss_f = deepmaxent_loss()
+        loss_f = DeepMaxEntLoss()
     else:
         raise ValueError(f"Unknown criterion: {criterion}")
 
@@ -361,7 +361,7 @@ def build_aef_neigh_features_triplet(
         pa_te[["x","y"]].values.tolist()
     ).bounds()
 
-    img = _build_aef_image(year=year, geometry=geom)
+    img = _build_aef_image(year=year, geometry=geom) 
 
     # Build combined output columns
     feat_names: List[str] = []

@@ -22,12 +22,12 @@ from src.model_training import (
     predict_logits,
     per_species_auc,
     DeepMaxEntModel,
-    deepmaxent_model_w_bias,
-    deepmaxent_loss,
+    DeepMaxEntPlotBias,
+    DeepMaxEntLoss,
     deepmaxent_loss_w_bias,
     SDMWithBias,
-    sdm_model_abn,
-    sdm_loss_abn,
+    ABNModel,
+    ABNLoss,
 )
 
 from src.load_data import load_po_pa_nceas
@@ -158,7 +158,7 @@ def run_one_method(
         ds = SDMDataset(X=X_po_scaled[covs].values, Y=Y_po[species].values)
         loader = make_loader_xy(ds)
         model = DeepMaxEntModel(len(covs), hidden_size, len(species), hidden_layers)
-        loss_fn = deepmaxent_loss()
+        loss_fn = DeepMaxEntLoss()
 
         train_loop(model, loader=loader, loss_fn=loss_fn, dataset=ds, train_cfg={**train_cfg, "model_type": model_type})
         logits = predict_logits(model, X_pa_scaled[covs].values, model_type=model_type)
@@ -189,7 +189,7 @@ def run_one_method(
         model = DeepMaxEntModel(len(covs), hidden_size, len(species), hidden_layers)
         # deepmaxent_loss supports soft targets as you built
         # loss_fn = BCEWithLogitsLoss()
-        loss_fn = deepmaxent_loss()
+        loss_fn = DeepMaxEntLoss()
 
         train_loop(model, loader=loader, loss_fn=loss_fn, train_cfg={**train_cfg, "model_type": model_type})
         logits = predict_logits(model, X_pa_scaled[covs].values, model_type=model_type)
@@ -216,8 +216,8 @@ def run_one_method(
     elif model_type == "PO_Only_ABN":
         ds = SDMDataset(X=X_po_scaled[covs].values, Y=Y_po[species].values)
         loader = make_loader_xy(ds)
-        model = sdm_model_abn(len(covs), hidden_size, len(species), hidden_layers)
-        loss_fn = sdm_loss_abn()
+        model = ABNModel(len(covs), hidden_size, len(species), hidden_layers)
+        loss_fn = ABNLoss()
 
         train_loop(model, loader=loader, loss_fn=loss_fn, train_cfg={**train_cfg, "model_type": model_type})
         logits = predict_logits(model, X_pa_scaled[covs].values, model_type=model_type)
@@ -227,10 +227,10 @@ def run_one_method(
         I_train = np.arange(len(X_po_scaled))
         ds = SDMDataset(X=X_po_scaled[covs].values, Y=Y_po[species].values, I=I_train)
         loader = make_loader_xy(ds)
-        model = deepmaxent_model_w_bias(len(covs), hidden_size, len(species), hidden_layers,
+        model = DeepMaxEntPlotBias(len(covs), hidden_size, len(species), hidden_layers,
                                         num_plots=len(X_po_scaled), separate=False)
         # your example uses BCE for this variant
-        loss_fn = deepmaxent_loss()
+        loss_fn = DeepMaxEntLoss()
 
         train_loop(model, loader=loader, loss_fn=loss_fn, train_cfg={**train_cfg, "model_type": model_type})
         I_eval = np.arange(len(X_pa_scaled))
@@ -241,7 +241,7 @@ def run_one_method(
         I_train = np.arange(len(X_po_scaled))
         ds = SDMDataset(X=X_po_scaled[covs].values, Y=Y_po[species].values, I=I_train)
         loader = make_loader_xy(ds)
-        model = deepmaxent_model_w_bias(len(covs), hidden_size, len(species), hidden_layers,
+        model = DeepMaxEntPlotBias(len(covs), hidden_size, len(species), hidden_layers,
                                         num_plots=len(X_po_scaled), separate=True)
         loss_fn = deepmaxent_loss_w_bias()
 

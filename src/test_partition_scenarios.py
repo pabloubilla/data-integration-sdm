@@ -27,7 +27,7 @@ from sklearn.cluster import KMeans
 from sklearn.metrics import pairwise_distances
 
 # --- your models & loss
-from src.models import DeepMaxEntModel, deepmaxent_loss, deepmaxent_model_w_bias
+from src.models import DeepMaxEntModel, DeepMaxEntLoss, DeepMaxEntPlotBias
 import src.pa_split as pa_split
 from src.model_training import smooth_targets_v3
 
@@ -142,7 +142,7 @@ def build_model(input_size: int, output_size: int, bias: bool, num_plots = None)
     if bias:
         if num_plots is None:
             raise ValueError("num_plots required for bias model.")
-        return deepmaxent_model_w_bias(
+        return DeepMaxEntPlotBias(
             input_size=input_size,
             hidden_size=HIDDEN_SIZE,
             output_size=output_size,
@@ -174,7 +174,7 @@ def train_model(
     if criterion == 'bce':
         loss_f = torch.nn.BCEWithLogitsLoss()
     elif criterion == 'deepmaxent':
-        loss_f = deepmaxent_loss()
+        loss_f = DeepMaxEntLoss()
 
     model.train()
     for epoch in range(1, epochs + 1):
@@ -727,7 +727,7 @@ def main():
 
             # spatial case, only use xy for partitioning and distance
             pa_splits, split_type_list = pa_split.partition_sweep_ranges(
-                X_pa_s, Y_pa, covs_xy, covs_xy, K_clusters=100, select_subset=10, train_proportion=.4, distance_metric='euclidean')
+                X_pa_s, Y_pa, covs_xy, covs_xy, K_clusters=100, select_subset=20, train_proportion=.4, distance_metric='euclidean')
 
 
             for split_id, (X_pa_tr, X_pa_te, Y_pa_tr, Y_pa_te, d_metric) in enumerate(pa_splits):

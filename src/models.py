@@ -5,18 +5,15 @@ from torch.autograd import Function
 import numpy as np
 
 
-class deepmaxent_loss(nn.Module):
+class DeepMaxEntLoss(nn.Module):
     def __init__(self):
-        super(deepmaxent_loss, self).__init__()
+        super(DeepMaxEntLoss, self).__init__()
     def forward(self, input, target):
         loss = -((target)*(input.log_softmax(0))).mean(0).mean()
         # # apply softmax to target as well
         # softmax_target = F.softmax(target, dim=0)
         # loss = -((softmax_target)*(input.log_softmax(0))).mean(0).mean()
         return loss
-
-
-
 
 class DeepMaxEntModel(nn.Module):
     def __init__(self, input_size: int, hidden_size: int, output_size: int, hidden_nbr: int):
@@ -41,11 +38,6 @@ class DeepMaxEntModel(nn.Module):
         # keep bias=False like your original
         self.output_layer = nn.Linear(hidden_size, output_size, bias=False)
 
-        # # (Optional) small init to keep things stable
-        # nn.init.kaiming_uniform_(self.fc1.weight, a=0.0)
-        # for l in self.hidden_layers:
-        #     nn.init.kaiming_uniform_(l.weight, a=0.0)
-        # nn.init.xavier_uniform_(self.output_layer.weight)
 
     def get_features(self, x: torch.Tensor) -> torch.Tensor:
         """Compute backbone features (before final linear head)."""
@@ -84,12 +76,12 @@ class SDMWithBias(nn.Module):
     Combines them to produce lambda: B x K
     """
     def __init__(self, n_species_covariates, n_species, n_bias_covariates,
-                 hidden_species=(128,64), hidden_bias=(64,64), link="logadd"):
+                 hidden_species=(128,64), hidden_bias=(64,64), output_bias=1):
         super().__init__()
         self.species_head = MLP(n_species_covariates, n_species, hidden_species)
-        self.bias_head    = MLP(n_bias_covariates, 1, hidden_bias)
-        assert link in {"logadd","multiply"}
-        self.link = link
+        self.bias_head    = MLP(n_bias_covariates, output_bias, hidden_bias)
+        # assert link in {"logadd","multiply"}
+        # self.link = link
 
         # Optional learnable global intercept per species
         # self.species_intercept = nn.Parameter(torch.zeros(1, n_species))
@@ -161,7 +153,11 @@ class deepmaxent_loss_w_bias(nn.Module):
 
 
 class PoissonCountAndPresenceLoss(nn.Module):
-    def __init__(self, bias_l2=1e-4, pa_w=1.5, clamp_log_rate=(-10, 10)):
+    ## TODO: Check these parameters
+    def __init__(self, bias_l2=1e-1, pa_w=2.5, 
+                #  clamp_log_rate=(-10, 10) # numerical stability
+                clamp_log_rate=None
+                 ):
         super().__init__()
         self.bias_l2 = bias_l2
         self.pa_w = pa_w
@@ -191,29 +187,14 @@ class PoissonCountAndPresenceLoss(nn.Module):
         # 3) regularize bias toward 0 => exp(bias) toward 1
         loss_reg = (bias_raw ** 2).mean()
 
-        return loss_poisson + self.pa_w * loss_pa + self.bias_l2 * loss_reg
+        return loss_poisson + self.pa_w * loss_pa #+ #self.bias_l2 * loss_reg
 
-# class deepmaxent_model(nn.Module):
-#     def __init__(self, input_size, hidden_size, output_size,hidden_nbr):
-#         super(deepmaxent_model, self).__init__()
-        
-#         self.fc1_lambda = nn.Linear(input_size, hidden_size)
-#         self.hidden_layers_lambda = nn.ModuleList([nn.Linear(hidden_size, hidden_size) for _ in range(hidden_nbr)])
-#         self.fc3_lambda = nn.Linear(hidden_size, output_size, bias = False)
-        
-#     def forward(self, xinput):
-#         x = self.fc1_lambda(xinput).relu()
-#         for layer in self.hidden_layers_lambda:
-#             x = layer(x).relu()+x
-#         x = self.fc3_lambda(x) # agregar (revisar), se le suma el vector de sesgo (que se asocia a los indices)
-        
-#         return x
-    
+
     
 # por ahora hay un sesgo por especie por deafult en nn.Linear
 
 # Asymmetric binomial noise model, probability of detection depends on species
-class sdm_model_abn(nn.Module):
+class ABNModel(nn.Module):
     def __init__(self, input_size, hidden_size, output_size, hidden_nbr):
         super().__init__()
         self.fc1_lambda = nn.Linear(input_size, hidden_size)
@@ -250,7 +231,7 @@ class sdm_model_abn(nn.Module):
         return logits, self.logit_theta
 
 
-class sdm_loss_abn(nn.Module):
+class ABNLoss(nn.Module):
     def __init__(self, eps=1e-8):
         super().__init__()
         self.eps = eps
@@ -289,25 +270,9 @@ class sdm_loss_abn(nn.Module):
         return -(ll_noise + ll_prior).mean()
 
 
-# class loss abn
-# class sdm_loss_abn(nn.Module):
-#     def __init__(self):
-#         super().__init__()
-
-#     def forward(self, probs, theta, yobs, q):
-#         """
-#         probs: probability of real y=1 from model, shape [batch, output_size]
-#         theta: probability of detection given y=1, shape [output_size]
-#         yobs: observed data (0/1), shape [batch, output_size]
-#         q: posterior probability (E-step output), shape [batch, output_size]
-#         """
-#         ll = q * (yobs * torch.log(theta) + (1 - yobs) * torch.log(1 - theta))
-#         ll += q * torch.log(probs) + (1 - q) * torch.log(1 - probs)
-#         return -ll.mean()
-
 
 ### Version with per-plot bias ###
-class deepmaxent_model_w_bias(nn.Module):
+class DeepMaxEntPlotBias(nn.Module):
     def __init__(self, input_size, hidden_size, output_size, hidden_nbr, num_plots,
                  separate = True):
         super().__init__()
@@ -350,7 +315,7 @@ class deepmaxent_model_w_bias(nn.Module):
 
 ######### To try domain adaptation #########
 
-class deepmaxent_domain(nn.Module):
+class DeepMaxEntDomain(nn.Module):
     def __init__(self, input_size, hidden_size, output_size, hidden_nbr):
         super().__init__()
         layers = []

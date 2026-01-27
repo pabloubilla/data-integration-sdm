@@ -16,7 +16,6 @@ from functools import lru_cache
 from shapely.prepared import prep
 from scipy.sparse import coo_matrix
 
-
 NE_URL = "https://naturalearth.s3.amazonaws.com/110m_cultural/ne_110m_admin_0_countries.zip"
 
 

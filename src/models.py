@@ -6,6 +6,7 @@ import numpy as np
 
 
 class DeepMaxEntLoss(nn.Module):
+    # this is a loss
     def __init__(self):
         super(DeepMaxEntLoss, self).__init__()
     def forward(self, input, target):

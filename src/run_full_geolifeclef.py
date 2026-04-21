@@ -13,8 +13,8 @@ import numpy as np
 import pandas as pd
 import pickle
 
-from load_data import build_paths_nceas, load_po_pa_nceas, load_po_pa_geoplant, load_po_pa_geoplant_full
-from utils import safe_reindex_columns, split_pa_train_test_spatially, scale_features
+from src.load_data import build_paths_nceas, load_po_pa_nceas, load_po_pa_geoplant, load_po_pa_geoplant_full
+from src.utils import safe_reindex_columns, split_pa_train_test_spatially, scale_features
 
 import torch
 from torch.utils.data import Dataset, DataLoader, RandomSampler
@@ -27,10 +27,10 @@ from sklearn.metrics import roc_auc_score
 from sklearn.linear_model import LogisticRegression
 from sklearn.cluster import KMeans
 # from k_means_constrained import KMeansConstrained
-from model_training import smooth_targets_v3, device, XZYDataset, XYDataset, set_all_seeds
+from src.model_training import smooth_targets_v3, device, XZYDataset, XYDataset, set_all_seeds
 
 # --- your models & loss
-from models import DeepMaxEntModel, DeepMaxEntLoss, SDMWithBias, deepmaxent_loss_w_bias, IntegratedLoss, BalancedBCELoss
+from src.models import DeepMaxEntModel, DeepMaxEntLoss, SDMWithBias, deepmaxent_loss_w_bias, IntegratedLoss, BalancedBCELoss
 
 
 # General Experiment settings
@@ -46,7 +46,7 @@ HIDDEN_SIZE = 250
 # HIDDEN_BIAS_SIZE = 3000
 HIDDEN_LAYERS = 2
 LR = 1e-3 # 1e-3
-LR_PO = 0.0005 #1e-3
+LR_PO = 0.00005 #1e-3
 EPOCHS = 20
 BATCH_SIZE = 500
 WEIGHT_DECAY = 3e-4
@@ -56,8 +56,8 @@ SEED = 40
 
 
 RUN_PO = False
-RUN_PA = False
-RUN_POPA_WEIGHTED = True
+RUN_PA = True
+RUN_POPA_WEIGHTED = False
 RUN_PO_LOGREG = False
 RUN_PO_W_BIAS = False
 RUN_PA_LOGREG = False
@@ -1263,6 +1263,8 @@ def run_experiment(
     name: str,
     X_train_df: pd.DataFrame, Y_tr: pd.DataFrame,
     X_test_df: pd.DataFrame,  Y_te: pd.DataFrame,
+    X_test_new_df: pd.DataFrame, # just for getting labels to upload to Kaggle (not used for training or eval)
+    species_map: list[str], # just for getting labels to upload to Kaggle (not used for training or eval)
     covs: List[str], species: List[str],
     output_dir: str, region: str, group: str,
     criterion = 'deepmaxent',
@@ -1288,7 +1290,7 @@ def run_experiment(
     scaler_path = os.path.join(output_dir, f"scaler_{name}_{region}{group}.pkl")
 
     # scale (fit on training split of this experiment)
-    X_train_scaled, X_test_scaled, _ = scale_features(
+    X_train_scaled, X_test_scaled, scaler = scale_features(
         X_train_df, X_test_df, covs, output_path=scaler_path, verbose=False
     )
 
@@ -1429,38 +1431,6 @@ def run_experiment(
 
 
 
-    # # evaluate on shared PA_test
-    # scores = predict(model, X_te, dev=device())
-
-    # # print a subset of scores
-
-    # # aucs = per_species_auc(Y_te, scores, species)
-    # # avg_auc = np.nanmean(list(aucs.values()))
-
-
-    # N_test = len(Y_te)
-    # species_len = len(species)
-
-    # # --- convert list-of-lists -> multi-hot matrix for eval only ---
-    # Y_te_mat = np.zeros((N_test, species_len), dtype=np.uint8)
-    # for i, lbls in enumerate(Y_te):
-    #     if lbls:  # non-empty list
-    #         Y_te_mat[i, np.asarray(lbls, dtype=np.int64)] = 1
-
-    # print(Y_te_mat[:10,:10])  # print a subset of the multi-hot labels for verification
-
-    # # --- compute per-class AUC (column-wise) ---
-    # aucs = {}
-    # how_many_in_test = 0
-    # for j, sp in enumerate(species):
-    #     yj = Y_te_mat[:, j]
-    #     # AUC is undefined if only one class present (all 0s or all 1s)
-    #     if yj.min() == yj.max():
-    #         aucs[sp] = np.nan
-    #     else:
-    #         aucs[sp] = roc_auc_score(yj, scores[:, j])
-    #         # print(f"AUC for {sp}: {aucs[sp]:.4f}, with {yj.sum()} positives and {len(yj) - yj.sum()} negatives.")
-    #         how_many_in_test += 1
 
     # print(f"Computed AUC for {how_many_in_test} species (out of {len(species)}).")
     scores = predict(model, X_te, dev=device())
@@ -1472,6 +1442,7 @@ def run_experiment(
     # avg_auc_site = per_site_auc(Y_te[species], scores)
     # avg_auc_site = np.nanmean(list(avg_auc_site.values()))
     avg_auc_site = np.nan
+
 
 
 
@@ -1489,6 +1460,45 @@ def run_experiment(
         "avg_auc_site": avg_auc_site,
     })
 
+
+    # scale X_test_new and predict
+    X_test_new_scaled = scaler.transform(X_test_new_df[covs])
+    test_new_scores = predict(model, X_test_new_scaled, dev=device())  # shape: (n_sites, n_species)
+
+    species_list = []
+
+    for i, survey_id in enumerate(X_test_new_df['surveyId']):
+        probs = test_new_scores[i]                     # probabilities for all species at site i
+        probs = 1 / (1 + np.exp(-probs))              # convert logits to probabilities if needed
+        K_i = int(round(probs.sum()))                  # expected number of species at site i
+
+
+
+        # keep K_i within valid bounds
+        K_i = max(0, min(K_i, len(probs)))
+
+        if K_i == 0:
+            present_species = []
+        else:
+            # indices of top K_i probabilities
+            top_k_indices = np.argsort(probs)[-K_i:][::-1]
+
+            # map model output indices to species ids/names
+            present_species = [species_map[idx] for idx in top_k_indices]
+
+        present_species_str = " ".join(map(str, present_species))
+
+        species_list.append({
+            "surveyId": survey_id,
+            "predictions": present_species_str
+        })
+
+    # pass to DF
+    test_new_preds_df = pd.DataFrame(species_list)
+    test_new_preds_df.to_csv(os.path.join(output_dir, f"test_new_predictions_{name}_{region}{group}.csv"), index=False)
+    # print where it was saved
+    print(f"Test set predictions saved to: {os.path.join(output_dir, f'test_new_predictions_{name}_{region}{group}.csv')}")
+
     return avg_auc, aucs, avg_auc_site, model_path, scaler_path
 
 def run_experiment_popa(
@@ -1499,7 +1509,7 @@ def run_experiment_popa(
     covs: List[str], species: List[str],
     output_dir: str, region: str, group: str,
     epochs: int = 300, lr: float = 1e-4,
-    batch_size: int = 256, w_pa: float = .5,
+    batch_size: int = 256, w_po: float = .5, w_pa: float = .5,
     weight_decay: float = WEIGHT_DECAY,
     print_every = PRINT_EVERY
 ):
@@ -1514,6 +1524,7 @@ def run_experiment_popa(
         "epochs": epochs,
         "lr": lr,
         "batch_size": batch_size,
+        "w_po": w_po,
         "w_pa": w_pa,
         "weight_decay": weight_decay
     })
@@ -1539,7 +1550,7 @@ def run_experiment_popa(
 
     # loaders separately (proportional sizes)
     batch_size_pa = batch_size
-    batch_size_po = batch_size 
+    batch_size_po = batch_size
     # proportion_batch = batch_size / len(X_pa_tr_s)
     # batch_size_po = int(len(X_po_s)*proportion_batch)
     print('Batch for PO: ', batch_size_po)
@@ -1595,13 +1606,12 @@ def run_experiment_popa(
         epochs: int = 300,
         lr: float = 1e-4,
         dev: Optional[torch.device] = None,
+        w_po: float = 1,
         w_pa: float = 1,
     ):
         dev = dev or device()
         model.to(dev)
         optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-5)
-
-        w_po = 1 - w_pa
 
         # criterion_po = DeepMaxEntLoss()
         # poisson loss
@@ -1629,8 +1639,6 @@ def run_experiment_popa(
                 probs_pa = -torch.expm1(-lambda_pa) + 1e-12  # convert logits to probabilities with numerical stability
                 loss_pa = criterion_pa(outputs_pa, yb_pa)
                 loss_po = criterion_po(outputs_po, yb_po)
-
-
 
                 loss = w_po * loss_po + w_pa * loss_pa
 
@@ -1664,6 +1672,7 @@ def run_experiment_popa(
         epochs=epochs,
         lr=lr,
         dev=device(),
+        w_po=w_po,
         w_pa=w_pa
     )
 
@@ -1986,6 +1995,18 @@ def main():
                 covariates_path=covariates_path
             )
 
+            # data/raw/GeoPlant/PresenceAbsenceSurveys/GLC25_PA_metadata_test.csv as survey_df
+            survey_df = pd.read_csv('data/raw/GeoPlant/PresenceAbsenceSurveys/GLC25_PA_metadata_test.csv')
+            X_pa_te_new = pd.read_csv('data/raw/GeoPlant/values/GLC25-PA-test-bioclimatic.csv')
+
+            # merge on surveyId
+            X_pa_te_new = X_pa_te_new.merge(survey_df[['surveyId']], on='surveyId', how='right')
+
+
+            # read data/processed/geoplant/full_data/all_species_list_original_ids.txt
+            with open('data/processed/GeoPlant/full_data/all_species_list_original_ids.txt', 'r') as f:
+                species_list_original = [line.strip() for line in f]    
+  
             print(f"PA split → train: {len(X_pa_tr)}, test: {len(X_pa_te)}")
 
             exp_dir = os.path.join(output_root, f"{region}{group}")
@@ -2003,6 +2024,13 @@ def main():
                 # Subsample Y (list-of-lists)
                 Y_po = [Y_po[i] for i in subsample_idx]
 
+
+
+            print('OLD X_pa_te:')
+            print(X_pa_te)
+            print('NEW X_pa_te:')
+            print(X_pa_te_new)
+            exit()
 
 
             
@@ -2052,6 +2080,7 @@ def main():
                     Y_tr=Y_po,
                     X_test_df=X_pa_te,  # evaluate on PA_test covs
                     Y_te=Y_pa_te,  # evaluate on PA_test labels
+                    X_test_new = X_pa_te_new,
                     covs=covs_no_po, species=species,
                     output_dir=exp_dir, region=region, group=group,
                     verbose=True, criterion='deepmaxent',
@@ -2101,6 +2130,7 @@ def main():
                     Y_tr=Y_pa_tr,
                     X_test_df=X_pa_te,
                     Y_te=Y_pa_te,
+                    X_test_new_df=X_pa_te_new, species_map = species_list_original,
                     covs=covs_no_po, species=species,
                     output_dir=exp_dir, region=region, group=group,
                     criterion = loss_criterion, verbose = True
@@ -2183,7 +2213,8 @@ def main():
                 print("\n--- Running Weighted PO+PA integration experiment ---")
 
                 # use domain_auc as weights
-                w_pa = .9
+                w_po = 1
+                w_pa = 2
 
                 auc_mix_w, aucs_mix_w, _, model_mix_w, scaler_mix_w = run_experiment_popa(
                     name="PO_plus_PA_weighted",
@@ -2198,6 +2229,7 @@ def main():
                     epochs=EPOCHS,
                     lr=LR,
                     batch_size=BATCH_SIZE,
+                    w_po=w_po,
                     w_pa=w_pa,
                     weight_decay=WEIGHT_DECAY
                 )

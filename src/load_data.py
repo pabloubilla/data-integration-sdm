@@ -1,8 +1,9 @@
 import os
 from typing import List, Tuple, Dict
 import pandas as pd
-from src.utils import safe_reindex_columns
+from utils import safe_reindex_columns
 import numpy as np
+from scipy.sparse import load_npz
 
 def build_paths_nceas(region: str, group_filter: str) -> Tuple[str, str, str]:
     ## this can be useful if we aggregate groups
@@ -260,42 +261,259 @@ def load_po_pa_nceas_OLD(region: str, group_filter: str, add_po_var: bool, keep_
 
 
 
+def filter_geoplant_species(X_po: pd.DataFrame, Y_po: pd.DataFrame,
+                            X_pa: pd.DataFrame, Y_pa: pd.DataFrame,
+                            species: List[str], min_occurrence: int = 20, min_percentage: float = None):
+    
+    species_count_po = Y_po.sum(axis=0)
+    species_count_pa = Y_pa.sum(axis=0)
 
-def load_po_pa_geoplant(  
-    data_path_po,
-    data_path_pa,
-    species_prefix: str = "sp_",
-    feature_prefix: str = "A",
+    if min_percentage is not None:
+        total_pa = len(Y_pa)
+        total_po = len(Y_po)
+        species_to_keep = [sp for sp in species if (species_count_po[sp] >= min_percentage * total_po) or (species_count_pa[sp] >= min_percentage * total_pa)]
+    if min_occurrence is not None:
+        species_to_keep = [sp for sp in species if (species_count_po[sp] >= min_occurrence) and (species_count_pa[sp] >= min_occurrence)]
+
+    # if both are not None raise warning and say order
+    if min_percentage is not None and min_occurrence is not None:
+        print("Warning: Both min_percentage and min_occurrence are set. First filtering by min_percentage, then by min_occurrence.")
+
+    X_po_filtered = X_po.copy()
+    Y_po_filtered = Y_po[species_to_keep].copy()
+    X_pa_filtered = X_pa.copy()
+    Y_pa_filtered = Y_pa[species_to_keep].copy()
+
+    print(f"Filtered species: kept {len(species_to_keep)} out of {len(species)} species with at least {min_occurrence} occurrences in PO or PA.")
+
+    return X_po_filtered, Y_po_filtered, X_pa_filtered, Y_pa_filtered, species_to_keep
+
+
+def aggregate_po_to_grid(
+    X_po: pd.DataFrame,
+    Y_po: pd.DataFrame,
+    grid_size: float = 1000.0,
+    y_agg: str = "sum",          # "sum" or "max"
+    cov_agg: str = "mean",
+    keep_cell_center: bool = True,
+    verbose: bool = True,
 ):
-    df_po = pd.read_csv(data_path_po)
-    df_pa = pd.read_csv(data_path_pa)
+    # ---- stats BEFORE ----
+    n_before = len(X_po)
+    avg_sp_before = Y_po.sum(axis=1).mean()
 
-    # change lon lat cols to x y
-    df_po = df_po.rename(columns={"lon": "x", "lat": "y"})
-    df_pa = df_pa.rename(columns={"lon": "x", "lat": "y"})
+    X = X_po.copy()
+    Y = Y_po.copy()
 
-    # Identify species columns
-    species_cols_po = [col for col in df_po.columns if col.startswith(species_prefix
-)]
-    species_cols_pa = [col for col in df_pa.columns if col.startswith(species_prefix)]
+    gx = np.floor(X["x"].to_numpy() / grid_size).astype(np.int64)
+    gy = np.floor(X["y"].to_numpy() / grid_size).astype(np.int64)
 
-    # make sure both are the same and in the same order
-    assert set(species_cols_po) == set(species_cols_pa), "Species columns do not match between PO and PA datasets."
-    species_cols = sorted(species_cols_po)
+    # grouping key
+    cell_index = pd.MultiIndex.from_arrays([gx, gy], names=["gx", "gy"])
 
-    # Identify feature columns
-    feature_cols_po = [col for col in df_po.columns if col.startswith(feature_prefix)]
-    feature_cols_pa = [col for col in df_pa.columns if col.startswith(feature_prefix)]  
-    # assert
-    assert set(feature_cols_po) == set(feature_cols_pa), "Feature columns do not match between PO and PA datasets."
-    feature_cols = sorted(feature_cols_po)
+    # ---- aggregate Y ----
+    if y_agg == "sum":
+        Yg = Y.groupby(cell_index).sum()
+    elif y_agg == "max":
+        Yg = Y.groupby(cell_index).max()
+    else:
+        raise ValueError("y_agg must be 'sum' or 'max'")
 
-    # add x and y to feature cols
-    feature_cols = ["x", "y"] + feature_cols
+    # ---- aggregate X ----
+    Xg = X.groupby(cell_index).agg(cov_agg)
 
-    X_po = df_po[feature_cols].copy()
-    Y_po = df_po[species_cols].copy()
-    X_pa = df_pa[feature_cols].copy()
-    Y_pa = df_pa[species_cols].copy()
+    # Ensure index is MultiIndex + set names (some pandas paths drop them)
+    if not isinstance(Xg.index, pd.MultiIndex):
+        Xg.index = pd.MultiIndex.from_tuples(Xg.index)
+    Xg.index = Xg.index.set_names(["gx", "gy"])
 
-    return X_po, Y_po, X_pa, Y_pa, species_cols, feature_cols
+    if not isinstance(Yg.index, pd.MultiIndex):
+        Yg.index = pd.MultiIndex.from_tuples(Yg.index)
+    Yg.index = Yg.index.set_names(["gx", "gy"])
+
+    if keep_cell_center:
+        gx_vals = Xg.index.get_level_values(0).to_numpy()
+        gy_vals = Xg.index.get_level_values(1).to_numpy()
+        Xg["x"] = (gx_vals + 0.5) * grid_size
+        Xg["y"] = (gy_vals + 0.5) * grid_size
+
+    # ---- stats AFTER ----
+    n_after = len(Xg)
+    avg_sp_after = Yg.sum(axis=1).mean()
+    reduction = n_before / n_after
+
+    if verbose:
+        print("PO grid aggregation")
+        print(f"  Grid size           : {grid_size:g}")
+        print(f"  Y aggregation       : {y_agg}")
+        print(f"  Sites before        : {n_before:,}")
+        print(f"  Sites after         : {n_after:,}")
+        print(f"  Reduction factor    : {reduction:.2f}×")
+        print(f"  Avg spp / site      : {avg_sp_before:.2f} → {avg_sp_after:.2f}")
+
+    # align
+    Xg = Xg.loc[Yg.index]
+
+    return Xg, Yg
+
+
+def load_po_pa_geoplant(data_path, region, 
+                        filter_species: bool = True, min_occurrence: int = 20, min_percentage: float = None,
+                        npz_file: bool = False, subsample_po: float = None, subsample_pa: float = None):
+    X_po = pd.read_csv(os.path.join(data_path, f"X_po_{region}_covs.csv"), index_col=0)
+    X_pa = pd.read_csv(os.path.join(data_path, f"X_pa_{region}_covs.csv"), index_col=0)
+
+    
+    
+    if npz_file:
+        Y_pa = load_npz(os.path.join(data_path, f"Y_pa_{region}.npz")).toarray()
+        Y_pa = pd.DataFrame(Y_pa, index=X_pa.index)
+        Y_po = load_npz(os.path.join(data_path, f"Y_po_{region}.npz")).toarray()
+        Y_po = pd.DataFrame(Y_po, index=X_po.index)
+        # add columns of species
+
+
+    else:
+        Y_po = pd.read_csv(os.path.join(data_path, f"Y_po_{region}.csv"))
+        Y_pa = pd.read_csv(os.path.join(data_path, f"Y_pa_{region}.csv"))
+    
+    
+    species = pd.read_csv(os.path.join(data_path, f"species_{region}.csv"), header=None).iloc[:,0].tolist()
+
+    covs = pd.read_csv(os.path.join(data_path, f"covariates_{region}.csv"), header=None).iloc[:,0].tolist()
+
+    # if npz_file add species
+    if npz_file:
+        Y_pa.columns = species
+        Y_po.columns = species
+
+
+    # change lon, lat to x, y
+    X_po = X_po.rename(columns={"lon": "x", "lat": "y"})
+    X_pa = X_pa.rename(columns={"lon": "x", "lat": "y"})
+    # make index of Y to be X indexes
+    Y_po.index = X_po.index
+    Y_pa.index = X_pa.index
+
+    # covs = X_pa.columns.tolist()[3:]  
+
+    if subsample_po is not None:
+        selected_indices = np.random.choice(X_po.index, size=int(len(X_po) * subsample_po), replace=False)
+        X_po, Y_po = X_po.loc[selected_indices], Y_po.loc[selected_indices]
+
+    if subsample_pa is not None:
+        selected_indices = np.random.choice(X_pa.index, size=int(len(X_pa) * subsample_pa), replace=False)
+        X_pa, Y_pa = X_pa.loc[selected_indices], Y_pa.loc[selected_indices]
+
+    if filter_species:
+        X_po, Y_po, X_pa, Y_pa, species = filter_geoplant_species(
+            X_po, Y_po, X_pa, Y_pa, species, min_occurrence=min_occurrence, min_percentage=min_percentage
+        )
+
+
+
+
+    # X_po, Y_po = aggregate_po_to_grid(X_po, Y_po, grid_size=.01, y_agg="sum")
+
+
+    # drop rows with all zeros in Y_po
+    nonzero_indices = Y_po.index[Y_po.sum(axis=1) > 0]
+    print(f"Kept {len(nonzero_indices)} out of {len(Y_po)} PO sites with non-zero species after aggregation.")
+    X_po = X_po.loc[nonzero_indices]
+    Y_po = Y_po.loc[nonzero_indices] 
+
+    # same for Y_pa
+    nonzero_indices_pa = Y_pa.index[Y_pa.sum(axis=1) > 0]
+    print(f"Kept {len(nonzero_indices_pa)} out of {len(Y_pa)} PA sites with non-zero species.")
+    X_pa = X_pa.loc[nonzero_indices_pa]
+    Y_pa = Y_pa.loc[nonzero_indices_pa]
+
+    # exit()
+          
+
+
+
+    # iter over Y_po rows
+    break_point = 0
+    for idx, row in Y_po.iterrows():
+        species_count = row.sum()
+        print(f"PO site {idx} has {species_count} species.")
+        break_point += 1
+        if break_point >= 5:
+            break
+        
+    
+
+    ## for column areaInM2 calculate mean without -inf and nan, then impute
+    # if 'areaInM2' in X_pa.columns:
+    #     area_mean = X_pa['areaInM2'].replace([np.inf, -np.inf], np.nan).mean()
+    #     X_pa['areaInM2'] = X_pa['areaInM2'].replace([np.inf, -np.inf], np.nan).fillna(area_mean)
+    #     print(f"Imputed areaInM2 with mean value: {area_mean}")
+
+    # impute with KNN using x,y
+    from sklearn.impute import KNNImputer
+    if 'areaInM2' in X_pa.columns:
+        # replace -inf and inf with NaN for imputation
+        X_pa['areaInM2'] = X_pa['areaInM2'].replace([np.inf, -np.inf], np.nan)
+        imputer = KNNImputer(n_neighbors=5)
+        X_pa_imputed = imputer.fit_transform(X_pa)
+        X_pa = pd.DataFrame(X_pa_imputed, columns=X_pa.columns, index=X_pa.index)
+        print("Imputed areaInM2 using KNN imputer based on nearest neighbors in covariate space.")
+        # new mean, how many nans
+        print(f"After imputation, areaInM2 mean: {X_pa['areaInM2'].mean()}, number of NaNs: {X_pa['areaInM2'].isna().sum()}")
+        # exit()
+    return X_po, Y_po, X_pa, Y_pa, species, covs
+
+
+
+
+def load_po_pa_geoplant_full(species_path, covariates_path):
+    # data/processed/geoplant/climatic/pa_train_covariates.pkl is like loading a pickle, load as numpy directly
+    X_pa_train = pd.read_pickle(os.path.join(covariates_path, "pa_train_covariates.pkl"))
+    X_pa_test = pd.read_pickle(os.path.join(covariates_path, "pa_test_covariates.pkl"))
+    X_po = pd.read_pickle(os.path.join(covariates_path, "po_covariates.pkl"))
+
+    # for species, load as csv
+    Y_pa_train = pd.read_csv(os.path.join(species_path, "pa_train_species.csv"))
+    Y_pa_test = pd.read_csv(os.path.join(species_path, "pa_test_species.csv"))
+    Y_po = pd.read_csv(os.path.join(species_path, "po_species.csv"))
+
+    # species list (is inside species_path as all_species_list.txt)
+    with open(os.path.join(species_path, "all_species_list_original_ids.txt"), "r") as f:
+        species = [line.strip() for line in f.readlines()]
+
+
+    # print headers
+    print("X_po columns:", X_po.columns.tolist())
+    print("X_pa_train columns:", X_pa_train.columns.tolist())
+    print("X_pa_test columns:", X_pa_test.columns.tolist())
+
+
+    def parse_species_column(df, col="speciesId"):
+        """Convert '12 45 900' → [12,45,900]"""
+        return (
+            df[col]
+            .fillna("")
+            .astype(str)
+            .str.split()
+            .apply(lambda xs: [int(x) for x in xs if x != ""])
+            .tolist()
+        )
+    
+    Y_po = parse_species_column(Y_po)
+    Y_pa_train = parse_species_column(Y_pa_train)
+    Y_pa_test = parse_species_column(Y_pa_test)
+
+    print("Sample Y_po species lists:")
+    print(Y_po[:3])
+    print("Sample Y_pa_train species lists:")
+    print(Y_pa_train[:3])
+    print("Sample Y_pa_test species lists:")
+    print(Y_pa_test[:3])
+
+
+    # covariates are columns of X_pa_train without first column
+    covariates = X_pa_train.columns.tolist()[1:]
+    print("Covariates:", covariates)
+
+    return X_po, Y_po, X_pa_train, Y_pa_train, X_pa_test, Y_pa_test, species, covariates

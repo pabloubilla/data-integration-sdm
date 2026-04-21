@@ -6,6 +6,7 @@ import os
 import random
 from typing import List, Tuple, Dict, Optional
 from time import time
+import tqdm
 
 import numpy as np
 import pandas as pd
@@ -20,37 +21,19 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import StandardScaler, MinMaxScaler
 from sklearn.metrics import roc_auc_score
 from sklearn.linear_model import LogisticRegression
 from sklearn.cluster import KMeans
 from sklearn.metrics import pairwise_distances
 
 # --- your models & loss
-from src.models import DeepMaxEntModel, deepmaxent_loss, deepmaxent_model_w_bias, SDMWithBias, PoissonCountAndPresenceLoss
+from src.models import DeepMaxEntModel, SDMWithBias, IntegratedLoss, DeepMaxEntLoss
 import src.pa_split as pa_split
-from src.model_training import smooth_targets_v3
-
-# =========================
-# Config
-# =========================
-# REGIONS = ["AWT", "NZ", "SWI"]
-# REGIONS = ['AWT']
-
-# REGIONS = ["AWT", "CAN", "NSW", "SA", "SWI", "NZ"]             # regions to run
-REGIONS = ['SWI']
-GROUPS_BY_REGION = {
-        # "AWT": ["_bird"],
-        "AWT": ["_plant", "_bird"],
-        "CAN": [""],
-        # "NSW": ['_plant', ],
-        "NSW": ['_bat', '_bird', '_plant', '_reptile'],
-        "SA" : [""],
-        "SWI": [""],
-        "NZ": [""]
-    }  
+from src.model_training import smooth_targets_v3, device
 
 
+SPLIT_NUMBER = 10  # How many splits
 
 
 # General Experiment settings
@@ -64,9 +47,9 @@ TEST_PA_FRACTION = 0.3        # PA split: test fraction
 HIDDEN_SIZE = 100
 # HIDDEN_BIAS_SIZE = 3000
 HIDDEN_LAYERS = 2
-LR = 1e-4
-EPOCHS = 100
-BATCH_SIZE = 250
+LR = 5e-3
+EPOCHS = 300
+BATCH_SIZE = 500
 MAX_BATCH_PERCENTAGE = 1
 PRINT_EVERY = 1000
 SEED = 42
@@ -74,8 +57,8 @@ SEED = 42
 RUN_PO = True
 RUN_PA = True
 RUN_POPA, ADD_INTERACTIONS = True, False
-RUN_POPA_SMOOTHED = True
-RUN_POPA_ENSEMBLE = True
+RUN_POPA_SMOOTHED = False
+RUN_POPA_ENSEMBLE = False
 RUN_POPA_BIAS = True
 
 
@@ -90,8 +73,8 @@ def set_all_seeds(seed: int = 42) -> None:
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
-def device() -> torch.device:
-    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# def device() -> torch.device:
+#     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 class XYDataset(Dataset):
     def __init__(self, X: np.ndarray, Y: np.ndarray, plot_ids = None):
@@ -143,7 +126,7 @@ def build_model(input_size: int, output_size: int, bias: bool, num_plots = None)
     if bias:
         if num_plots is None:
             raise ValueError("num_plots required for bias model.")
-        return deepmaxent_model_w_bias(
+        return SDMWithBias(
             input_size=input_size,
             hidden_size=HIDDEN_SIZE,
             output_size=output_size,
@@ -175,7 +158,7 @@ def train_model(
     if criterion == 'bce':
         loss_f = torch.nn.BCEWithLogitsLoss()
     elif criterion == 'deepmaxent':
-        loss_f = deepmaxent_loss()
+        loss_f = DeepMaxEntLoss()
 
     model.train()
     for epoch in range(1, epochs + 1):
@@ -203,7 +186,181 @@ def train_model(
 
 
 
+def run_experiment_popa_smoothed(
+    name: str,
+    X_po_df: pd.DataFrame, Y_po_df: pd.DataFrame,
+    X_pa_tr_df: pd.DataFrame, Y_pa_tr_df: pd.DataFrame,
+    X_pa_te_df: pd.DataFrame, Y_pa_te_df: pd.DataFrame,
+    covs: List[str], species: List[str],
+    output_dir: str, region: str, group: str,
+    epochs: int = 300, lr: float = 1e-4,
+    batch_size: int = 256, w_po: float = .5, w_pa: float = .5,
+):
+    os.makedirs(output_dir, exist_ok=True)
+    scaler_path = os.path.join(output_dir, f"scaler_{name}_{region}{group}.pkl")
 
+    # scale (fit on combo PO + PA train)
+    scaler = StandardScaler().fit(
+        pd.concat([X_po_df[covs], X_pa_tr_df[covs]], axis=0)
+    )
+    
+    X_po_s = X_po_df.copy()
+    X_pa_tr_s = X_pa_tr_df.copy()
+    X_pa_te_s = X_pa_te_df.copy()
+    X_po_s[covs] = scaler.transform(X_po_s[covs])
+    X_pa_tr_s[covs] = scaler.transform(X_pa_tr_s[covs])
+    X_pa_te_s[covs] = scaler.transform(X_pa_te_s[covs])
+
+    batch_size = min(batch_size, int(len(X_pa_tr_s) * MAX_BATCH_PERCENTAGE))
+
+   
+
+    model = DeepMaxEntModel(input_size=len(covs), hidden_size=HIDDEN_SIZE, output_size=len(species), hidden_nbr=HIDDEN_LAYERS)
+    # criterion_species = deepmaxent_loss()
+
+    # loaders separately (proportional sizes)
+    # proportion_po = len(X_po_s) / (len(X_po_s) + len(X_pa_tr_s))
+    # proportion_pa = len(X_pa_tr_s) / (len(X_po_s) + len(X_pa_tr_s))
+    # batch_size_po = max(1, int(batch_size*proportion_po))
+    # batch_size_pa = max(1, int(batch_size*proportion_pa))
+    # print('Batch for PO: ', batch_size_po)
+    # print('Batch for PA: ', batch_size_pa)
+    batch_size_pa = min(batch_size, int(len(X_pa_tr_s) * MAX_BATCH_PERCENTAGE))
+    proportion_batch = batch_size / len(X_pa_tr_s)
+    batch_size_po = max(1, int(len(X_po_s) * proportion_batch))
+    print('Batch for PA: ', batch_size_pa)
+    print('Batch for PO: ', batch_size_po)
+
+    po_ds = XYDataset(X_po_s[covs].values.astype(np.float32), Y_po_df[species].values.astype(np.float32))
+    pa_ds = XYDataset(X_pa_tr_s[covs].values.astype(np.float32), Y_pa_tr_df[species].values.astype(np.float32))
+    po_loader = DataLoader(po_ds, batch_size=batch_size_po, shuffle=True, drop_last=False)
+    pa_loader = DataLoader(pa_ds, batch_size=batch_size_pa, shuffle=True, drop_last=False)
+
+
+
+    def train_popa_model(
+        model: nn.Module,
+        po_loader: DataLoader,
+        pa_loader: DataLoader,
+        po_ds: Dataset,
+        pa_ds: Dataset,
+        criterion_species: nn.Module,
+        epochs: int = 300,
+        lr: float = 1e-4,
+        dev: Optional[torch.device] = None,
+        w_po: float = .5,
+        w_pa: float = .5,
+    ):
+        dev = dev or device()
+        model.to(dev)
+        optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=3e-4)
+        # criterion_po = deepmaxent_loss()
+
+        # criterion_pa = deepmaxent_loss()#torch.nn.BCEWithLogitsLoss()
+
+        # beta = 0.8  # initial smoothing parameter
+        # beta be a vector of species size
+        beta = np.array([0.8]*len(species))
+
+        model.train()
+        for epoch in range(1, epochs + 1):
+            running_loss = 0.0
+            for (xb_po, yb_po, _), (xb_pa, yb_pa, _) in zip(po_loader, pa_loader):
+                xb_po = xb_po.to(dev)
+                yb_po = yb_po.to(dev)
+                xb_pa = xb_pa.to(dev)
+                yb_pa = yb_pa.to(dev)
+
+                optimizer.zero_grad()
+                outputs_po= model(xb_po)
+                outputs_pa= model(xb_pa)
+
+                # smooth PO targets
+                yb_po_smooth = smooth_targets_v3(yb_po,outputs_po,beta)
+                
+
+                # concat outputs and labels
+                output_mix = torch.cat([outputs_po, outputs_pa], dim=0)
+                yb_mix = torch.cat([yb_po_smooth, yb_pa], dim=0)
+                loss = criterion_species(output_mix, yb_mix)
+
+                # loss_po = criterion_po(outputs_po, yb_po)
+                # loss_pa = criterion_pa(outputs_pa, yb_pa)
+                # loss = w_po * loss_po + w_pa * loss_pa
+
+                loss.backward()
+                optimizer.step()
+                running_loss += loss.item() * (xb_po.size(0) + xb_pa.size(0))
+
+            with torch.no_grad():
+                    # update beta with M-step
+
+                ## access the full Y
+                y = po_ds.Y.to(dev)
+                logits_full = model(po_ds.X.to(dev))
+                # reshape beta to have same number as columns as y
+                # beta = np.array([beta] * y.shape[1]) # could be better
+                y_soft_full = smooth_targets_v3(y, logits_full, beta)
+
+                y_pa = pa_ds.Y.to(dev)
+
+                y_complete = torch.cat([y, y_pa], dim=0)
+                y_complete_soft = torch.cat([y_soft_full, y_pa], dim=0)
+
+                # apply the threshold for zeros as well
+                # threshold_zero = epoch / train_cfg['epochs'] * 0.01
+                # y_soft_full = torch.where((y == 0) & (y_soft_full < threshold_zero), torch.zeros_like(y_soft_full), y_soft_full)
+
+                
+                numer = (y_complete_soft * (1 - y_complete)).sum(dim=0)
+                denom = y_complete_soft.sum(dim=0)
+                # numer = (y_soft * (1 - y)).sum(dim=0)
+                # denom = y_soft.sum(dim=0)
+
+                theta = torch.zeros_like(numer)
+
+                # only update where denom > 0
+                mask = denom > 0
+                theta[mask] = numer[mask] / denom[mask]
+
+                theta = theta.clamp(0.0, 1.0)
+
+                beta = 1-theta.cpu().numpy()
+         
+
+        avg_loss = running_loss / (len(po_loader.dataset) + len(pa_loader.dataset))
+    
+    # for loss use BCE
+    loss_fn = torch.nn.BCEWithLogitsLoss()
+
+    train_popa_model(
+        model=model,
+        po_loader=po_loader,
+        pa_loader=pa_loader,
+        po_ds=po_ds,
+        pa_ds=pa_ds,
+        criterion_species=loss_fn,
+        epochs=epochs,
+        lr=lr,
+        dev=device(),
+        w_po=w_po,
+        w_pa=w_pa
+    )
+
+    # evaluate on PA_test
+    X_te_np = X_pa_te_s[covs].values.astype(np.float32)
+    scores = predict(model, X_te_np, dev=device())
+    aucs = per_species_auc(Y_pa_te_df[species], scores, species)
+    avg_auc = np.nanmean(list(aucs.values()))
+
+
+
+
+
+    # model_path = os.path.join(output_dir, f"deepmaxent_DA_{region}{group}.pt")
+    # torch.save(model, model_path)
+    model_path = None
+    return avg_auc, aucs, model_path, scaler_path
 
 
 
@@ -225,14 +382,19 @@ def predict(model: nn.Module, X: np.ndarray, dev: Optional[torch.device] = None,
 
 def per_species_auc(y_true: pd.DataFrame, y_score: np.ndarray, species: List[str]) -> Dict[str, float]:
     scores: Dict[str, float] = {}
+    nan_count = 0
     for i, sp in enumerate(species):
         try:
-            auc = roc_auc_score(y_true[sp].values, y_score[:, i])
+            # if only one class keep as nan
+            if len(np.unique(y_true[sp].values)) < 2:
+                auc = np.nan
+                nan_count += 1
+            else:
+                auc = roc_auc_score(y_true[sp].values, y_score[:, i])
         except ValueError:
             auc = np.nan
         scores[sp] = auc
-    #     print(f"  Species {sp}: AUC = {auc:.4f}")
-    # exit()
+    print(f"Warning: {nan_count} species had only one class in true labels, AUC set to NaN for these.")
     return scores
 
 
@@ -494,6 +656,7 @@ def run_experiment_popa_bias(
     # NEW: Fourier feature controls (safe defaults)
     bias_fourier_freqs: int = 6,
     bias_fourier_include_raw: bool = True,
+    print_every: int = 10,
 ):
     os.makedirs(output_dir, exist_ok=True)
     scaler_path = os.path.join(output_dir, f"scaler_{name}_{region}{group}.pkl")
@@ -513,12 +676,13 @@ def run_experiment_popa_bias(
     # -------------------------
     # 2) Scale bias covs, then expand with Fourier features
     # -------------------------
-    scaler_bias = StandardScaler().fit(pd.concat([X_po_df[covs_bias], X_pa_tr_df[covs_bias]], axis=0))
+    # Should Standard or MinMax make a difference here?
+    scaler_bias = MinMaxScaler().fit(pd.concat([X_po_df[covs_bias], X_pa_tr_df[covs_bias]], axis=0))
 
     # scaled raw bias covs
-    X_po_bias_scaled = scaler_bias.transform(X_po_df[covs_bias].values)
-    X_pa_tr_bias_scaled = scaler_bias.transform(X_pa_tr_df[covs_bias].values)
-    X_pa_te_bias_scaled = scaler_bias.transform(X_pa_te_df[covs_bias].values)
+    X_po_bias_scaled = scaler_bias.transform(X_po_df[covs_bias])
+    X_pa_tr_bias_scaled = scaler_bias.transform(X_pa_tr_df[covs_bias])
+    X_pa_te_bias_scaled = scaler_bias.transform(X_pa_te_df[covs_bias])
 
     # Fourier-expanded bias covs (this is what the bias net will see)
     X_po_bias_ff = _fourier_features(
@@ -546,7 +710,8 @@ def run_experiment_popa_bias(
         n_species=len(species),
         n_bias_covariates=X_po_bias_ff.shape[1],  # UPDATED
         hidden_species=hidden_species_arquitecture,
-        hidden_bias=(2000, 2000)
+        hidden_bias=(1000, 1000), 
+        output_bias=1,
     )
 
     # -------------------------
@@ -557,13 +722,9 @@ def run_experiment_popa_bias(
     # batch_size_po = max(1, int(batch_size * proportion_po))
     # batch_size_pa = max(1, int(batch_size * proportion_pa))
     
-    batch_size = min(batch_size, int(len(X_pa_tr_s) * MAX_BATCH_PERCENTAGE))
-    batch_size = min(batch_size, int(len(X_po_s) * MAX_BATCH_PERCENTAGE))
-
-    batch_size_pa = batch_size 
-    # scale batch size PO according to data size ratio
-    proportion_po = len(X_po_s) / (len(X_po_s) + len(X_pa_tr_s))
-    batch_size_po = max(1, int(batch_size * proportion_po))
+    batch_size_pa = min(batch_size, int(len(X_pa_tr_s) * MAX_BATCH_PERCENTAGE))
+    proportion_batch = batch_size / len(X_pa_tr_s)
+    batch_size_po = int(len(X_po_s)*proportion_batch)
 
     print('Batch for PO: ', batch_size_po)
     print('Batch for PA: ', batch_size_pa)
@@ -607,8 +768,8 @@ def run_experiment_popa_bias(
         optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=3e-4)
 
         model.train()
-        loss_fn = PoissonCountAndPresenceLoss()
-        for epoch in range(1, epochs + 1):
+        loss_fn = IntegratedLoss(w_pa = 1)
+        for epoch in  tqdm.tqdm(range(1, epochs + 1), desc="Training epochs"):
             running_loss = 0.0
             for (xb_po, zb_po, yb_po), (xb_pa, yb_pa, _) in zip(po_loader, pa_loader):
                 xb_po = xb_po.to(dev)
@@ -624,6 +785,9 @@ def run_experiment_popa_bias(
                 loss.backward()
                 optimizer.step()
                 running_loss += loss.item() * (xb_po.size(0) + xb_pa.size(0))
+            if epoch % print_every == 0 or epoch == 1 or epoch == epochs:
+                avg_loss = running_loss / (len(po_loader.dataset) + len(pa_loader.dataset))
+                print(f"Epoch {epoch:5d}/{epochs} | Train Loss: {avg_loss:.4f}")
 
     loss_fn = None
     train_popa_model_bias(
@@ -648,9 +812,6 @@ def run_experiment_popa_bias(
     aucs = per_species_auc(Y_pa_te_df[species], scores, species)
     avg_auc = np.nanmean(list(aucs.values()))
 
-    # aucs_site = per_site_auc(Y_pa_te_df[species], scores)
-    # avg_auc_site = np.nanmean(list(aucs_site.values()))
-
     # -------------------------
     # 7) Predict bias on PO points (UPDATED: use Fourier features)
     # -------------------------
@@ -661,11 +822,12 @@ def run_experiment_popa_bias(
     scores_t, bias_scores_t = model(X_po_tensor, X_po_bias_tensor)
     bias_scores = bias_scores_t.detach().cpu().numpy()
 
-    # plot the bias (same as before)
+    # # plot the bias (same as before)
     import matplotlib.pyplot as plt
+    sigmoid_bias_scores = 1 / (1 + np.exp(-bias_scores))  # convert logits to probabilities for better visualization
     plt.figure(figsize=(8, 6))
-    plt.scatter(X_po_s['x'], X_po_s['y'], c=bias_scores, cmap='viridis', s=2, alpha=0.7)
-    plt.colorbar(label='Bias Score')
+    plt.scatter(X_po_s['x'], X_po_s['y'], c=sigmoid_bias_scores, cmap='viridis', s=2, alpha=0.7)
+    plt.colorbar(label='Bias Score (Probability)')
     plt.xlabel('X Coordinate')
     plt.ylabel('Y Coordinate')
     plt.title('Predicted Bias Scores at PO Locations')
@@ -676,6 +838,7 @@ def run_experiment_popa_bias(
     plt.savefig(file_name)
 
     model_path = None
+
     return avg_auc, aucs, model_path, scaler_path
 
 
@@ -852,12 +1015,6 @@ def run_experiment_popa_ensemble(
 
 
 
-
-
-
-
-
-
 # =========================
 # Main
 # =========================
@@ -866,8 +1023,9 @@ def main():
     set_all_seeds(SEED)
     dev = device()
     print(f"Using device: {dev}")
+    data_folder = f"france_sparse_0.4_0.1"
 
-    output_root = os.path.join("output", "integration_geoplant")
+    output_root = os.path.join("output", "integration_geoplant", data_folder)
     os.makedirs(output_root, exist_ok=True)
     summary_rows = []
 
@@ -881,22 +1039,18 @@ def main():
 
             # use these paths for now
             # data/processed/geoplant/geoplant_po_mediterranean_withcovs.csv
-            po_path = os.path.join(
-                "data", "processed", "geoplant", f"geoplant_po_{region.lower()}_withcovs.csv"
-            )
-            pa_path = os.path.join(
-                "data", "processed", "geoplant", f"geoplant_pa_{region.lower()}_withcovs.csv"
-            )
 
             # 1) Load PO & PA, aligned species & covs
+            data_path = os.path.join("data", "processed", "geoplant", data_folder)
             X_po, Y_po, X_pa, Y_pa, species, covs = load_po_pa_geoplant(
-                po_path, pa_path
+                data_path, region, filter_species=True, min_occurrence=30, npz_file=True,
+                subsample_po = 0.3, subsample_pa = 1
             )
             print(f"Loaded PO: {len(X_po)} samples, PA: {len(X_pa)} samples")
             print(f"Species: {len(species)}, Covariates: {len(covs)}")
             # using the following covariates and species 
-            print(f"Covariates: {covs}")
-            print(f"Species: {species}")
+            # print(f"Covariates: {covs}")
+            # print(f"Species: {species}")
 
 
             covs = [c for c in covs if c not in ['x','y']] 
@@ -935,23 +1089,17 @@ def main():
             # domain_auc = domain_probe(X_po_s, X_pa_tr_s, covs_copy, verbose=True)
 
 
-            # IMPORTANT FOR V2: This gives circulas partitions, which may be less desirable (still not finished)
-            # pa_splits, split_type_list = pa_split.partition_sweep_ranges_v2(
-            #     X_pa_s, Y_pa, covs_xy, covs_xy, K_clusters=20, select_subset=1, train_proportion=.4, distance_metric='euclidean')
-
-
- 
-            # # spatial case, only use xy for partitioning and distance
-            # pa_splits, split_type_list = pa_split.partition_sweep_ranges(
-            #     X_pa_s, Y_pa, covs_xy, covs_xy, K_clusters=100, select_subset=10, train_proportion=.4, distance_metric='euclidean')
-            
-
             pa_splits, split_type_list = pa_split.partition_sweep_ranges(
-                X_pa_s, Y_pa, covs, covs, K_clusters=100, select_subset=5, train_proportion=.4, distance_metric='mahalanobis')
+                X_pa_s, Y_pa, covs_cluster=covs_xy, covs_distance=covs, K_clusters=100, select_subset=SPLIT_NUMBER, train_proportion=1/3, distance_metric='mahalanobis')
 
 
             for split_id, (X_pa_tr, X_pa_te, Y_pa_tr, Y_pa_te, d_metric) in enumerate(pa_splits):
                 print(f'---- RUNNING SPLIT NUMBER {split_id} ----')
+
+                # only use species present in test
+                species_in_test = Y_pa_te[species].sum(axis=0) > 0
+                species_used = [s for i, s in enumerate(species) if species_in_test.iloc[i]]
+                print(f"Using {len(species_used)}/{len(species)} species present in PA_test")
 
 
                 if RUN_PO:
@@ -965,8 +1113,9 @@ def main():
                         Y_train_df=Y_po,
                         X_test_df=X_pa_te,  # evaluate on PA_test covs
                         Y_test_df=Y_pa_te,  # evaluate on PA_test labels
-                        covs=covs, species=species,
-                        output_dir=exp_dir, region=region, group=group
+                        covs=covs, species=species_used,
+                        output_dir=exp_dir, region=region, group=group,
+                        criterion='deepmaxent'
                     )
                     print(f"[PO-only]   Average AUC on PA_test: {auc_po:.4f}")
 
@@ -981,7 +1130,7 @@ def main():
                         Y_train_df=Y_pa_tr,
                         X_test_df=X_pa_te,
                         Y_test_df=Y_pa_te,
-                        covs=covs, species=species,
+                        covs=covs, species=species_used,
                         output_dir=exp_dir, region=region, group=group,
                         criterion = loss_criterion
                     )
@@ -1016,9 +1165,9 @@ def main():
                         Y_train_df=Y_mix,
                         X_test_df=X_pa_te,
                         Y_test_df=Y_pa_te,
-                        covs=covs_to_use, species=species,
+                        covs=covs_to_use, species=species_used,
                         output_dir=exp_dir, region=region, group=group,
-                        criterion = 'deepmaxent'
+                        criterion = 'bce'
                     )
 
                     
@@ -1029,25 +1178,24 @@ def main():
 
                     covs_to_use = covs + (['PO'] if ADD_PO_VAR else [])
 
-                    auc_mix_smooth, aucs_mix_smooth, model_mix_smooth, scaler_mix_smooth = run_experiment_popa(
-                        name="PO_plus_PA_smooth",
-                        X_po_df=X_po_s,
-                        Y_po_df=Y_po,
-                        X_pa_tr_df=X_pa_tr,
-                        Y_pa_tr_df=Y_pa_tr,
-                        X_pa_te_df=X_pa_te,
-                        Y_pa_te_df=Y_pa_te,
-                        covs=covs_to_use, species=species,
-                        output_dir=exp_dir, region=region, group=group,
-                        epochs=EPOCHS,
-                        lr=LR,
-                        batch_size=BATCH_SIZE,
-                        w_po=0.5,
-                        w_pa=0.5
-                    )
+                    auc_mix_smooth, aucs_mix_smooth, model_mix_smooth, scaler_mix_smooth = run_experiment_popa_smoothed(
+                                        name="PO_plus_PA_smoothed",
+                                        X_po_df=X_po_s,
+                                        Y_po_df=Y_po,
+                                        X_pa_tr_df=X_pa_tr,
+                                        Y_pa_tr_df=Y_pa_tr,
+                                        X_pa_te_df=X_pa_te,
+                                        Y_pa_te_df=Y_pa_te,
+                                        covs=covs_to_use, species=species_used,
+                                        output_dir=exp_dir, region=region, group=group,
+                                        epochs=EPOCHS,
+                                        lr=LR,
+                                        batch_size=BATCH_SIZE)
+
                     print(f"[PO+PA Smooth] Average AUC on PA_test: {auc_mix_smooth:.4f}")   
 
                 if RUN_POPA_BIAS:
+                    print("\n--- Running PO+PA with Bias experiment ---")
                     
                     covs_to_use = covs + (['PO'] if ADD_PO_VAR else [])
                     covs_bias = covs_xy  # bias covariates
@@ -1060,7 +1208,7 @@ def main():
                         Y_pa_tr_df=Y_pa_tr,
                         X_pa_te_df=X_pa_te,
                         Y_pa_te_df=Y_pa_te,
-                        covs=covs_to_use, covs_bias=covs_bias, species=species,
+                        covs=covs_to_use, covs_bias=covs_bias, species=species_used,
                         output_dir=exp_dir, region=region, group=group,
                         epochs=EPOCHS,
                         lr=LR,
@@ -1079,7 +1227,7 @@ def main():
                         Y_pa_tr_df=Y_pa_tr,
                         X_pa_te_df=X_pa_te,
                         Y_pa_te_df=Y_pa_te,
-                        covs=covs, species=species,
+                        covs=covs, species=species_used,
                         output_dir=exp_dir, region=region, group=group,
                         epochs=EPOCHS,
                         lr=LR,
@@ -1111,7 +1259,7 @@ def main():
                 summary_rows.append(row_info)
 
                 # detailed per-species
-                for sp in species:
+                for sp in species_used:
                     detailed_row = {
                         "region": region,
                         "group": group or "(all)",
@@ -1143,7 +1291,7 @@ def main():
     # print(f"\nSummary saved to: {summary_path}")
 
     detailed_summary_df = pd.DataFrame(detailed_summary)
-    detailed_summary_path = os.path.join(output_root, 'partition_results_detailed_covariates.csv')
+    detailed_summary_path = os.path.join(output_root, 'partition_results_detailed_environmental.csv')
     detailed_summary_df.to_csv(detailed_summary_path, index=False)
     print(f"Detailed summary saved to: {detailed_summary_path}")
 

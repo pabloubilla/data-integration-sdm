@@ -6,9 +6,9 @@ import pandas as pd
 
 from typing import Dict, List, Optional, Sequence
 
-from src.load_data import load_po_pa_nceas
-from src.utils import scale_features
-from src.models import (DeepMaxEntModel, DeepMaxEntLoss, 
+from load_data import load_po_pa_nceas
+from utils import scale_features
+from models import (DeepMaxEntModel, DeepMaxEntLoss, 
                         DeepMaxEntPlotBias, deepmaxent_loss_w_bias, 
                         SDMWithBias, ABNModel, ABNLoss)
 
@@ -16,6 +16,65 @@ from torch.nn import BCEWithLogitsLoss
 
 from sklearn.metrics import roc_auc_score
 
+import random
+
+# =========================
+# Utils
+# =========================
+def set_all_seeds(seed: int = 42) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+def device() -> torch.device:
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if torch.backends.mps.is_available() and torch.backends.mps.is_built():
+        return torch.device("mps")
+    return torch.device("cpu")
+
+class XYDataset(Dataset):
+    def __init__(self, X: np.ndarray, Y: np.ndarray, plot_ids: Optional[np.ndarray] = None):
+        self.X = torch.tensor(X, dtype=torch.float32)
+        self.Y = torch.tensor(Y, dtype=torch.float32)
+        self.plot_ids = None if plot_ids is None else torch.tensor(plot_ids, dtype=torch.long)
+
+    def __len__(self) -> int:
+        return self.X.shape[0]
+
+    def __getitem__(self, idx: int):
+        if self.plot_ids is None:
+            # keep triple to match training loop
+            return self.X[idx], self.Y[idx], torch.tensor(idx, dtype=torch.long)
+        else:
+            return self.X[idx], self.Y[idx], self.plot_ids[idx]
+
+
+class XZYDataset(Dataset):
+    def __init__(
+        self,
+        X_species: np.ndarray,     # (N, Cx)
+        Z_bias: np.ndarray,        # (N, Cz)
+        Y: np.ndarray,             # (N, K)
+        # mask: np.ndarray | None = None  # (N, K) boolean or 0/1 for missing labels
+    ):
+        assert len(X_species) == len(Z_bias) == len(Y)
+        self.Xs = torch.tensor(X_species, dtype=torch.float32)
+        self.Zb = torch.tensor(Z_bias, dtype=torch.float32)
+        self.Y  = torch.tensor(Y, dtype=torch.float32)
+        # self.mask = None if mask is None else torch.tensor(mask.astype(bool))
+
+    def __len__(self) -> int:
+        return self.Xs.shape[0]
+
+    def __getitem__(self, idx: int):
+        # if self.mask is None:
+        #     return self.Xs[idx], self.Zb[idx], self.Y[idx]#, None
+        # else:
+        return self.Xs[idx], self.Zb[idx], self.Y[idx]#, self.mask[idx]
 
 class SDMDataset(Dataset):
     """
@@ -195,19 +254,6 @@ def weaken_negatives(y_true: torch.Tensor,
     y_smooth = torch.where(y_true > 0, y_true, (1 - lamb) * p)
     return y_smooth
 
-# def smooth_targets(y_true: torch.Tensor,
-#                     logits: torch.Tensor,
-#                     beta: float | np.array) -> torch.Tensor:
-#     """
-#     Build soft targets:
-#       if y==1 -> keep 1
-#       if y==0 -> use beta * p_model (DETACHED)
-#     """
-#     with torch.no_grad():
-#         p = torch.sigmoid(logits)
-#     # y_smooth = y*1 + (1-y) * beta * p
-#     y_smooth = torch.where(y_true > 0, y_true, beta * p)
-#     return y_smooth
 
 
 '''

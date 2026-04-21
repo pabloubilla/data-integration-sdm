@@ -6,6 +6,7 @@ import os
 import random
 from typing import List, Tuple, Dict, Optional
 from time import time
+import tqdm
 
 import numpy as np
 import pandas as pd
@@ -20,7 +21,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import StandardScaler, MinMaxScaler
 from sklearn.metrics import roc_auc_score
 from sklearn.linear_model import LogisticRegression
 from sklearn.cluster import KMeans
@@ -28,7 +29,7 @@ from sklearn.cluster import KMeans
 from src.model_training import smooth_targets_v3, device, XZYDataset, XYDataset, set_all_seeds
 
 # --- your models & loss
-from src.models import DeepMaxEntModel, DeepMaxEntLoss, DeepMaxEntPlotBias, deepmaxent_domain, grad_reverse, DomainDiscriminator, DeepMaxentTwoHead, SDMWithBias, deepmaxent_loss_w_bias, PoissonCountAndPresenceLoss
+from src.models import DeepMaxEntModel, DeepMaxEntLoss, DeepMaxEntPlotBias, DomainDiscriminator, DeepMaxentTwoHead, SDMWithBias, deepmaxent_loss_w_bias, IntegratedLoss
 
 
 # General Experiment settings
@@ -41,20 +42,21 @@ TEST_PA_FRACTION = 0.3        # PA split: test fraction
 # Model / training
 HIDDEN_SIZE = 250
 # HIDDEN_BIAS_SIZE = 3000
-HIDDEN_LAYERS = 3
-LR = 1e-4
+HIDDEN_LAYERS = 2
+LR = 1e-3 # 1e-3
+LR_PO = 1e-4
 EPOCHS = 100
-BATCH_SIZE = 250
+BATCH_SIZE = 512
 MAX_BATCH_PERCENTAGE = 1
-PRINT_EVERY = 1000
+PRINT_EVERY = 30
 SEED = 40
 
 RUN_PO = False
 RUN_PO_LOGREG = False
 RUN_PO_W_BIAS = False
-RUN_PA = False
+RUN_PA = True
 RUN_PA_LOGREG = False
-RUN_POPA, ADD_INTERACTIONS = True, False
+RUN_POPA, ADD_INTERACTIONS = False, False
 RUN_IMPUTED_POPA = False
 RUN_POPA_ENSEMBLE = False
 RUN_POPA_SMOOTHED = False
@@ -112,7 +114,7 @@ def train_model(
         loss_f = DeepMaxEntLoss()
 
     model.train()
-    for epoch in range(1, epochs + 1):
+    for epoch in tqdm.tqdm(range(1, epochs + 1)):
         running_loss = 0.0
         for xb, yb, idx in train_loader:
             xb = xb.to(dev)
@@ -308,8 +310,7 @@ def run_experiment_popa_smoothed_w_prior(
             print('For species ', sp, ' beta: ', beta[i])
             print('Predicted presences sum: ', np.sum(predicted_presences), ' Real presences sum: ', np.sum(Y_po_df[sp].values))
             # print('Predicted PO zeros sum: ', predicted_zeros, ' Real PO sum: ', real)
-            
-    # exit()
+        
 
     # loaders separately (proportional sizes)
     proportion_po = len(X_po_s) / (len(X_po_s) + len(X_pa_tr_s))
@@ -482,12 +483,18 @@ def run_experiment_popa_smoothed(
     # criterion_species = deepmaxent_loss()
 
     # loaders separately (proportional sizes)
-    proportion_po = len(X_po_s) / (len(X_po_s) + len(X_pa_tr_s))
-    proportion_pa = len(X_pa_tr_s) / (len(X_po_s) + len(X_pa_tr_s))
-    batch_size_po = max(1, int(batch_size*proportion_po))
-    batch_size_pa = max(1, int(batch_size*proportion_pa))
-    print('Batch for PO: ', batch_size_po)
+    # proportion_po = len(X_po_s) / (len(X_po_s) + len(X_pa_tr_s))
+    # proportion_pa = len(X_pa_tr_s) / (len(X_po_s) + len(X_pa_tr_s))
+    # batch_size_po = max(1, int(batch_size*proportion_po))
+    # batch_size_pa = max(1, int(batch_size*proportion_pa))
+    # print('Batch for PO: ', batch_size_po)
+    # print('Batch for PA: ', batch_size_pa)
+    batch_size_pa = min(batch_size, int(len(X_pa_tr_s) * MAX_BATCH_PERCENTAGE))
+    proportion_batch = batch_size / len(X_pa_tr_s)
+    batch_size_po = max(1, int(len(X_po_s) * proportion_batch))
     print('Batch for PA: ', batch_size_pa)
+    print('Batch for PO: ', batch_size_po)
+
     po_ds = XYDataset(X_po_s[covs].values.astype(np.float32), Y_po_df[species].values.astype(np.float32))
     pa_ds = XYDataset(X_pa_tr_s[covs].values.astype(np.float32), Y_pa_tr_df[species].values.astype(np.float32))
     po_loader = DataLoader(po_ds, batch_size=batch_size_po, shuffle=True, drop_last=False)
@@ -648,12 +655,21 @@ def run_experiment_popa_omission_bias(
     X_pa_tr_s[covs] = scaler.transform(X_pa_tr_s[covs])
     X_pa_te_s[covs] = scaler.transform(X_pa_te_s[covs])
 
-    X_po_s_bias = X_po_df.copy()
-    X_po_s_bias[covs_bias] = scaler_bias.transform(X_po_s_bias[covs_bias])
-    X_pa_tr_s_bias = X_pa_tr_df.copy()
-    X_pa_tr_s_bias[covs_bias] = scaler_bias.transform(X_pa_tr_s_bias[covs_bias])
-    X_pa_te_s_bias = X_pa_te_df.copy()
-    X_pa_te_s_bias[covs_bias] = scaler_bias.transform(X_pa_te_s_bias[covs_bias])
+    # -------------------------
+    # 2) Scale bias covs, then expand with Fourier features
+    # -------------------------
+    scaler_bias = MinMaxScaler().fit(pd.concat([X_po_df[covs_bias], X_pa_tr_df[covs_bias]], axis=0))
+
+    # scaled raw bias covs
+    X_po_bias_scaled = scaler_bias.transform(X_po_df[covs_bias])
+    X_pa_tr_bias_scaled = scaler_bias.transform(X_pa_tr_df[covs_bias])
+    X_pa_te_bias_scaled = scaler_bias.transform(X_pa_te_df[covs_bias])
+
+    # Fourier-expanded bias covs (this is what the bias net will see)
+    X_po_bias_ff = _fourier_features(
+        X_po_bias_scaled, n_freqs=6, include_input=True
+    )
+
 
     batch_size = min(batch_size, int(len(X_pa_tr_s) * MAX_BATCH_PERCENTAGE))
 
@@ -661,26 +677,34 @@ def run_experiment_popa_omission_bias(
 
     # model = deepmaxent_model(input_size=len(covs), hidden_size=HIDDEN_SIZE, output_size=len(species), hidden_nbr=HIDDEN_LAYERS)
 
+    hidden_species_arquitecture = (HIDDEN_SIZE,) * HIDDEN_LAYERS
+
     model = SDMWithBias(
         n_species_covariates=len(covs),
         n_species=len(species),
-        n_bias_covariates=len(covs_bias),
-        hidden_species=(128, 64),
-        hidden_bias=(500, 250),
-        output_bias=1
+        n_bias_covariates=X_po_bias_ff.shape[1],  # UPDATED,
+        hidden_species=hidden_species_arquitecture,
+        hidden_bias=(100, 100),
+        output_bias=1,
     )
 
     # criterion_species = deepmaxent_loss()
 
     # loaders separately (proportional sizes)
-    proportion_po = len(X_po_s) / (len(X_po_s) + len(X_pa_tr_s))
-    proportion_pa = len(X_pa_tr_s) / (len(X_po_s) + len(X_pa_tr_s))
-    batch_size_po = max(1, int(batch_size*proportion_po))
-    batch_size_pa = max(1, int(batch_size*proportion_pa))
-    print('Batch for PO: ', batch_size_po)
+    # proportion_po = len(X_po_s) / (len(X_po_s) + len(X_pa_tr_s))
+    # proportion_pa = len(X_pa_tr_s) / (len(X_po_s) + len(X_pa_tr_s))
+    # batch_size_po = max(1, int(batch_size*proportion_po))
+    # batch_size_pa = max(1, int(batch_size*proportion_pa))
+    # print('Batch for PO: ', batch_size_po)
+    # print('Batch for PA: ', batch_size_pa)
+
+    batch_size_pa = min(batch_size, int(len(X_pa_tr_s) * MAX_BATCH_PERCENTAGE))
+    proportion_batch = batch_size / len(X_pa_tr_s)
+    batch_size_po = max(1, int(len(X_po_s) * proportion_batch))
     print('Batch for PA: ', batch_size_pa)
+    print('Batch for PO: ', batch_size_po)
     # po_ds = XYDataset(X_po_s[covs].values.astype(np.float32), Y_po_df[species].values.astype(np.float32))
-    po_ds = XZYDataset(X_po_s[covs].values.astype(np.float32), X_po_s_bias[covs_bias].values.astype(np.float32), Y_po_df[species].values.astype(np.float32))
+    po_ds = XZYDataset(X_po_s[covs].values.astype(np.float32), X_po_bias_ff, Y_po_df[species].values.astype(np.float32))
     pa_ds = XYDataset(X_pa_tr_s[covs].values.astype(np.float32), Y_pa_tr_df[species].values.astype(np.float32))
     po_loader = DataLoader(po_ds, batch_size=batch_size_po, shuffle=True, drop_last=False)
     pa_loader = DataLoader(pa_ds, batch_size=batch_size_pa, shuffle=True, drop_last=False)
@@ -708,9 +732,9 @@ def run_experiment_popa_omission_bias(
         # criterion_pa = deepmaxent_loss()#torch.nn.BCEWithLogitsLoss()
 
         model.train()
-        # loss_fn = PoissonCountAndPresenceLoss()
-        loss_fn = torch.nn.BCEWithLogitsLoss()
-        for epoch in range(1, epochs + 1):
+        loss_fn = IntegratedLoss(w_pa = 1, po_loss=False)
+        # loss_fn = torch.nn.BCEWithLogitsLoss()
+        for epoch in tqdm.tqdm(range(1, epochs + 1)):
             running_loss = 0.0
             for (xb_po, zb_po, yb_po), (xb_pa, yb_pa, _) in zip(po_loader, pa_loader):
                 xb_po = xb_po.to(dev)
@@ -726,6 +750,8 @@ def run_experiment_popa_omission_bias(
 
                 # transform bias to probabilities with sigmoid (is dim of species)
                 bias_prob_po = torch.sigmoid(bias_pred_po)
+                # bias_prob_po = 0.05
+                # bias_prob_po = 0.1
 
                 ### TODO: check the methodology here
                 # smooth y_po with bias_prob_po using the formula bias_prob_po * yb_po  / (bias_prob_po * yb_po + (1 - bias_prob_po))
@@ -736,11 +762,16 @@ def run_experiment_popa_omission_bias(
                 yb_po_smooth = torch.where(yb_po == 1, torch.ones_like(yb_po_smooth), yb_po_smooth)
 
 
-                loss = loss_fn(score_po, yb_po_smooth) + loss_fn(score_pa, yb_pa)
+                # loss = loss_fn(score_po, yb_po_smooth) + loss_fn(score_pa, yb_pa)
+                loss = loss_fn(score_po, score_pa, 0, yb_po_smooth, yb_pa)
 
                 loss.backward()
                 optimizer.step()
                 running_loss += loss.item() * (xb_po.size(0) + xb_pa.size(0))
+
+            if epoch % PRINT_EVERY == 0:
+                avg_loss = running_loss / (len(po_loader.dataset) + len(pa_loader.dataset))
+                print(f"Epoch {epoch}/{epochs}, Loss: {avg_loss:.4f}")
 
 
     # for loss use BCE
@@ -782,7 +813,7 @@ def run_experiment_popa_omission_bias(
 
 def _fourier_features(
     X: np.ndarray,
-    n_freqs: int = 6,
+    n_freqs: int = 5,
     include_input: bool = True,
 ) -> np.ndarray:
     """
@@ -807,16 +838,18 @@ def run_experiment_popa_bias(
     X_po_df: pd.DataFrame, Y_po_df: pd.DataFrame,
     X_pa_tr_df: pd.DataFrame, Y_pa_tr_df: pd.DataFrame,
     X_pa_te_df: pd.DataFrame, Y_pa_te_df: pd.DataFrame,
-    covs: List[str], covs_bias: List[str], species: List[str],
+    covs: List[str], covs_bias: List[str], area_cov: str, species: List[str],
     output_dir: str, region: str, group: str,
     epochs: int = 300, lr: float = 1e-4,
     batch_size: int = 256, w_po: float = .5, w_pa: float = .5,
     # NEW: Fourier feature controls (safe defaults)
-    bias_fourier_freqs: int = 6,
+    bias_fourier_freqs: int = 10,
     bias_fourier_include_raw: bool = True,
+    print_every: int = 10,
 ):
     os.makedirs(output_dir, exist_ok=True)
     scaler_path = os.path.join(output_dir, f"scaler_{name}_{region}{group}.pkl")
+
 
     # -------------------------
     # 1) Scale species covs (fit on PO + PA train)
@@ -833,12 +866,13 @@ def run_experiment_popa_bias(
     # -------------------------
     # 2) Scale bias covs, then expand with Fourier features
     # -------------------------
-    scaler_bias = StandardScaler().fit(pd.concat([X_po_df[covs_bias], X_pa_tr_df[covs_bias]], axis=0))
+    # Should Standard or MinMax make a difference here?
+    scaler_bias = MinMaxScaler().fit(pd.concat([X_po_df[covs_bias], X_pa_tr_df[covs_bias]], axis=0))
 
     # scaled raw bias covs
-    X_po_bias_scaled = scaler_bias.transform(X_po_df[covs_bias].values)
-    X_pa_tr_bias_scaled = scaler_bias.transform(X_pa_tr_df[covs_bias].values)
-    X_pa_te_bias_scaled = scaler_bias.transform(X_pa_te_df[covs_bias].values)
+    X_po_bias_scaled = scaler_bias.transform(X_po_df[covs_bias])
+    X_pa_tr_bias_scaled = scaler_bias.transform(X_pa_tr_df[covs_bias])
+    X_pa_te_bias_scaled = scaler_bias.transform(X_pa_te_df[covs_bias])
 
     # Fourier-expanded bias covs (this is what the bias net will see)
     X_po_bias_ff = _fourier_features(
@@ -866,7 +900,8 @@ def run_experiment_popa_bias(
         n_species=len(species),
         n_bias_covariates=X_po_bias_ff.shape[1],  # UPDATED
         hidden_species=hidden_species_arquitecture,
-        hidden_bias=(2000, 2000)
+        hidden_bias=(500, 500), 
+        output_bias=1,
     )
 
     # -------------------------
@@ -877,13 +912,9 @@ def run_experiment_popa_bias(
     # batch_size_po = max(1, int(batch_size * proportion_po))
     # batch_size_pa = max(1, int(batch_size * proportion_pa))
     
-    batch_size = min(batch_size, int(len(X_pa_tr_s) * MAX_BATCH_PERCENTAGE))
-    batch_size = min(batch_size, int(len(X_po_s) * MAX_BATCH_PERCENTAGE))
-
-    batch_size_pa = batch_size 
-    # scale batch size PO according to data size ratio
-    proportion_po = len(X_po_s) / (len(X_po_s) + len(X_pa_tr_s))
-    batch_size_po = max(1, int(batch_size * proportion_po))
+    batch_size_pa = min(batch_size, int(len(X_pa_tr_s) * MAX_BATCH_PERCENTAGE))
+    proportion_batch = batch_size / len(X_pa_tr_s)
+    batch_size_po = int(len(X_po_s)*proportion_batch)
 
     print('Batch for PO: ', batch_size_po)
     print('Batch for PA: ', batch_size_pa)
@@ -898,9 +929,15 @@ def run_experiment_popa_bias(
         X_po_bias_ff,  # UPDATED: Fourier features
         Y_po_df[species].values.astype(np.float32)
     )
-    pa_ds = XYDataset(
+    # pa_ds = XYDataset(
+    #     X_pa_tr_s[covs].values.astype(np.float32),
+    #     Y_pa_tr_df[species].values.astype(np.float32)
+    # )
+    pa_ds = XZYDataset(
         X_pa_tr_s[covs].values.astype(np.float32),
+        X_pa_tr_df[area_cov].values.astype(np.float32),
         Y_pa_tr_df[species].values.astype(np.float32)
+
     )
 
     po_loader = DataLoader(po_ds, batch_size=batch_size_po, shuffle=True, drop_last=False)
@@ -927,23 +964,30 @@ def run_experiment_popa_bias(
         optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=3e-4)
 
         model.train()
-        loss_fn = PoissonCountAndPresenceLoss()
-        for epoch in range(1, epochs + 1):
+        loss_fn = IntegratedLoss(w_pa = 2, add_area=False, po_loss='deepmaxent')
+        for epoch in  tqdm.tqdm(range(1, epochs + 1), desc="Training epochs"):
             running_loss = 0.0
-            for (xb_po, zb_po, yb_po), (xb_pa, yb_pa, _) in zip(po_loader, pa_loader):
+            for (xb_po, zb_po, yb_po), (xb_pa, area_b_pa, yb_pa) in zip(po_loader, pa_loader):
+                
+            
+
                 xb_po = xb_po.to(dev)
                 zb_po = zb_po.to(dev)
                 yb_po = yb_po.to(dev)
                 xb_pa = xb_pa.to(dev)
                 yb_pa = yb_pa.to(dev)
+                # area_b_pa = area_b_pa.to(dev)
 
                 optimizer.zero_grad()
                 score_po, bias_pred_po = model(xb_po, zb_po)
                 score_pa, _ = model(xb_pa)
-                loss = loss_fn(score_po, score_pa, bias_pred_po, yb_po, yb_pa)
+                loss = loss_fn(score_po, score_pa, bias_pred_po, yb_po, yb_pa, area_b_pa)
                 loss.backward()
                 optimizer.step()
                 running_loss += loss.item() * (xb_po.size(0) + xb_pa.size(0))
+            if epoch % print_every == 0 or epoch == 1 or epoch == epochs:
+                avg_loss = running_loss / (len(po_loader.dataset) + len(pa_loader.dataset))
+                print(f"Epoch {epoch:5d}/{epochs} | Train Loss: {avg_loss:.4f}")
 
     loss_fn = None
     train_popa_model_bias(
@@ -968,8 +1012,8 @@ def run_experiment_popa_bias(
     aucs = per_species_auc(Y_pa_te_df[species], scores, species)
     avg_auc = np.nanmean(list(aucs.values()))
 
-    # aucs_site = per_site_auc(Y_pa_te_df[species], scores)
-    # avg_auc_site = np.nanmean(list(aucs_site.values()))
+    aucs_site = per_site_auc(Y_pa_te_df[species], scores)
+    avg_auc_site = np.nanmean(list(aucs_site.values()))
 
     # -------------------------
     # 7) Predict bias on PO points (UPDATED: use Fourier features)
@@ -981,11 +1025,16 @@ def run_experiment_popa_bias(
     scores_t, bias_scores_t = model(X_po_tensor, X_po_bias_tensor)
     bias_scores = bias_scores_t.detach().cpu().numpy()
 
-    # plot the bias (same as before)
+    # max, min, mean and median
+    print(f"Bias scores - max: {bias_scores.max():.4f}, min: {bias_scores.min():.4f}, mean: {bias_scores.mean():.4f}, median: {np.median(bias_scores):.4f}")
+
+    # # plot the bias (same as before)
     import matplotlib.pyplot as plt
+    # sigmoid_bias_scores = 1 / (1 + np.exp(-bias_scores))  # convert logits to probabilities for better visualizations
+    sigmoid_bias_scores = bias_scores  # if bias_scores are already probabilities (e.g., if output_bias=1 and no activation), use directly
     plt.figure(figsize=(8, 6))
-    plt.scatter(X_po_s['x'], X_po_s['y'], c=bias_scores, cmap='viridis', s=2, alpha=0.7)
-    plt.colorbar(label='Bias Score')
+    plt.scatter(X_po_s['x'], X_po_s['y'], c=sigmoid_bias_scores, cmap='viridis', s=.1, alpha=0.7)
+    plt.colorbar(label='Bias Score (Probability)')
     plt.xlabel('X Coordinate')
     plt.ylabel('Y Coordinate')
     plt.title('Predicted Bias Scores at PO Locations')
@@ -996,7 +1045,8 @@ def run_experiment_popa_bias(
     plt.savefig(file_name)
 
     model_path = None
-    return avg_auc, aucs, model_path, scaler_path
+
+    return avg_auc, aucs, avg_auc_site, model_path, scaler_path
 
 
 
@@ -1055,12 +1105,19 @@ def predict(model: nn.Module, X: np.ndarray, dev: Optional[torch.device] = None,
 
 def per_species_auc(y_true: pd.DataFrame, y_score: np.ndarray, species: List[str]) -> Dict[str, float]:
     scores: Dict[str, float] = {}
+    nan_count = 0
     for i, sp in enumerate(species):
         try:
-            auc = roc_auc_score(y_true[sp].values, y_score[:, i])
+            # if only one class keep as nan
+            if len(np.unique(y_true[sp].values)) < 2:
+                auc = np.nan
+                nan_count += 1
+            else:
+                auc = roc_auc_score(y_true[sp].values, y_score[:, i])
         except ValueError:
             auc = np.nan
         scores[sp] = auc
+    print(f"Warning: {nan_count} species had only one class in true labels, AUC set to NaN for these.")
     return scores
 
 
@@ -1075,17 +1132,23 @@ def per_site_auc(
 
     sites = y_true.index.tolist()
 
+    nan_count = 0
     for i, site in enumerate(sites):
         try:
-            auc = roc_auc_score(
-                y_true.iloc[i].values,
-                y_score[i, :]
-            )
+            if len(np.unique(y_true.iloc[i].values)) < 2:
+                auc = np.nan
+                nan_count += 1
+            else:
+                auc = roc_auc_score(
+                    y_true.iloc[i].values,
+                    y_score[i, :]
+                )
         except ValueError:
             auc = np.nan
 
         scores[site] = auc
 
+    print(f"Warning: {nan_count} sites had only one class in true labels, AUC set to NaN for these.")
     return scores
 
 
@@ -1100,7 +1163,10 @@ def run_experiment(
     covs: List[str], species: List[str],
     output_dir: str, region: str, group: str,
     criterion = 'deepmaxent',
-    verbose: bool = False
+    verbose: bool = False, 
+    epochs: int = EPOCHS,
+    lr: float = LR,
+    batch_size: int = BATCH_SIZE
 ):
     os.makedirs(output_dir, exist_ok=True)
     scaler_path = os.path.join(output_dir, f"scaler_{name}_{region}{group}.pkl")
@@ -1117,7 +1183,7 @@ def run_experiment(
     Y_te = Y_test_df[species].copy()
 
     # dataloader
-    batch_size_consolidated = max(1, min(BATCH_SIZE, int(len(X_tr) * MAX_BATCH_PERCENTAGE)))
+    batch_size_consolidated = max(1, min(batch_size, int(len(X_tr) * MAX_BATCH_PERCENTAGE)))
     plots_idx = np.arange(len(X_tr))  # dummy plot indices for bias model
     train_ds = XYDataset(X_tr, Y_tr, plots_idx)
     train_loader = DataLoader(train_ds, batch_size=batch_size_consolidated, shuffle=True, drop_last=False)
@@ -1133,8 +1199,8 @@ def run_experiment(
         model=model,
         train_loader=train_loader,
         criterion=criterion,
-        epochs=EPOCHS,
-        lr=LR,
+        epochs=epochs,
+        lr=lr,
         print_every=PRINT_EVERY,
         dev=device(),
         verbose=verbose
@@ -1142,6 +1208,8 @@ def run_experiment(
 
     # evaluate on shared PA_test
     scores = predict(model, X_te, dev=device())
+    # print a subset of scores
+
     aucs = per_species_auc(Y_te, scores, species)
     avg_auc = np.nanmean(list(aucs.values()))
 
@@ -1547,7 +1615,10 @@ def main():
 
     regions = ['france']
 
-    output_root = os.path.join("output", f"integration_geoplant_{regions[0]}")
+    
+    data_folder = "france_sparse_1_0.2"
+
+    output_root = os.path.join("output", f"integration_geoplant_{data_folder}")
     os.makedirs(output_root, exist_ok=True)
     summary_rows = []
 
@@ -1556,46 +1627,49 @@ def main():
             print(f"\n=== REGION: {region}, GROUP: {group or '(all)'} ===")
 
 
-
             # use these paths for now
-            # data/processed/geoplant/geoplant_po_mediterranean_withcovs.csv
-            po_path = os.path.join(
-                "data", "processed", "geoplant", f"geoplant_po_{region.lower()}_withcovs.csv"
-            )
-            pa_path = os.path.join(
-                "data", "processed", "geoplant", f"geoplant_pa_{region.lower()}_withcovs.csv"
-            )
+            data_path = os.path.join("data", "processed", "geoplant", data_folder)
 
-            # 1) Load PO & PA, aligned species & covs
-            X_po, Y_po, X_pa, Y_pa, species, covs = load_po_pa_geoplant(
-                po_path, pa_path
-            )
-            print(f"Loaded PO: {len(X_po)} samples, PA: {len(X_pa)} samples")
-            print(f"Species: {len(species)}, Covariates: {len(covs)}")
-            # using the following covariates and species 
-            print(f"Covariates: {covs}")
-            print(f"Species: {species}")
-    
- 
+
+
+            
+            X_po, Y_po, X_pa, Y_pa, species, covs = load_po_pa_geoplant(data_path, region,
+                                                                         filter_species=True, min_percentage=.03, min_occurrence=None,
+                                                                         npz_file=True, subsample_po=1)
+            
+            area_col = 'areaInM2'
+
+            # # subsample PO to 0.1 (REMEMBER TO REMOVE)
+            # random_index_po = X_po.sample(frac=1, random_state=SEED).index
+            # X_po = X_po.loc[random_index_po]
+            # Y_po = Y_po.loc[random_index_po]
+
+            # PRINTS
+            print(f"Loaded data:")
+            print(f"  PO points: {len(X_po)}")
+            print(f"  PA points: {len(X_pa)}")
+            print(f"  Species: {len(species)}")
+            print(f"  Covariates: {len(covs)}")
+
 
             # 2) Split PA → train/test (fixed for all experiments)
             X_pa_tr, X_pa_te, Y_pa_tr, Y_pa_te = split_pa_train_test_spatially(
-                X_pa, Y_pa, test_frac=TEST_PA_FRACTION, seed=SEED, K = 100
+                X_pa, Y_pa, test_frac=TEST_PA_FRACTION, seed=SEED, K = 80
             )
             print(f"PA split → train: {len(X_pa_tr)}, test: {len(X_pa_te)}")
 
             exp_dir = os.path.join(output_root, f"{region}{group}")
 
             ### test if separable
-            # X_po = X_po.drop(columns=["x","y"], errors="ignore")
-            scaler = StandardScaler().fit(X_pa_tr[covs])
-            X_po_s = X_po.copy()
-            X_po_s[covs] = scaler.transform(X_po_s[covs])
-            X_pa_tr_s = X_pa_tr.copy()
-            X_pa_tr_s[covs] = scaler.transform(X_pa_tr_s[covs])
-            # drop PO column if present
-            X_po_s = X_po_s.drop(columns=["PO"], errors="ignore")
-            X_pa_tr_s = X_pa_tr_s.drop(columns=["PO"], errors="ignore")
+            # # X_po = X_po.drop(columns=["x","y"], errors="ignore")
+            # scaler = StandardScaler().fit(X_pa_tr[covs])
+            # X_po_s = X_po.copy()
+            # X_po_s[covs] = scaler.transform(X_po_s[covs])
+            # X_pa_tr_s = X_pa_tr.copy()
+            # X_pa_tr_s[covs] = scaler.transform(X_pa_tr_s[covs])
+            # # drop PO column if present
+            # X_po_s = X_po_s.drop(columns=["PO"], errors="ignore")
+            # X_pa_tr_s = X_pa_tr_s.drop(columns=["PO"], errors="ignore")
             
             # domain_auc = domain_probe(X_po_s, X_pa_tr_s, covs_copy, verbose=True)
 
@@ -1623,8 +1697,22 @@ def main():
 
             if RUN_PO:
                 print("\n--- Running PO-only experiment ---")
-                # A) PO-only → PA_test
-   
+                # # A) PO-only → PA_test
+                # print('X_po sample:')
+                # print(X_po.head())
+                # # print sum of each column
+                # print('Y_po sample:')
+                # print(Y_po.head())
+                # print('X_pa_te sample:')
+                # print(X_pa_te.head())
+                # print('Y_pa_te sample:')
+                # print(Y_pa_te.head())
+                # print('Covariates used (no PO):', covs_no_po)
+                # print('Species used:', species[:5], '...')
+
+                # for s in species:
+                #     print(f"Species {s}: PO presence sum = {Y_po[s].sum()}, PA_test presence sum = {Y_pa_te[s].sum()}")
+                # exit()
      
                 auc_po, aucs_po, auc_po_site, model_po, scaler_po = run_experiment(
                     name="PO_only",
@@ -1633,7 +1721,9 @@ def main():
                     X_test_df=X_pa_te,  # evaluate on PA_test covs
                     Y_test_df=Y_pa_te,  # evaluate on PA_test labels
                     covs=covs_no_po, species=species,
-                    output_dir=exp_dir, region=region, group=group
+                    output_dir=exp_dir, region=region, group=group,
+                    verbose=True, criterion='deepmaxent',
+                    lr=LR_PO
                 )
                 print(f"[PO-only]   Average AUC on PA_test: {auc_po:.4f}")
 
@@ -1824,6 +1914,7 @@ def main():
 
 
             if RUN_POPA_BIAS:
+                print("\n--- Running PO+PA (with BIAS) integration experiment ---")
                 auc_mix_b, aucs_mix_b, auc_mix_b_site, model_mix_b, scaler_mix_b = run_experiment_popa_bias(
                     name="PO_plus_PA_bias",
                     X_po_df=X_po,
@@ -1832,11 +1923,12 @@ def main():
                     Y_pa_tr_df=Y_pa_tr,
                     X_pa_te_df=X_pa_te,
                     Y_pa_te_df=Y_pa_te,
-                    covs=env_covs,  covs_bias=["x", "y"], species=species,
+                    covs=env_covs,  covs_bias=["x", "y"], area_cov=[area_col], species=species,
                     output_dir=exp_dir, region=region, group=group,
                     epochs=EPOCHS,
                     lr=LR,
                     batch_size=BATCH_SIZE,
+                    print_every=PRINT_EVERY
              
                 )
                 print(f"[Bias PO+PA]     Average AUC on PA_test: {auc_mix_b:.4f}")
@@ -1903,6 +1995,7 @@ def main():
 
     # print(summary[['AUC_PO_only','AUC_PO_w_bias']].mean())
     # summary.to_csv('output/data_integration_results.csv')
+
     summary_path = os.path.join(output_root, "summary_integration_geoplant.csv")
     summary.to_csv(summary_path, index=False)
 

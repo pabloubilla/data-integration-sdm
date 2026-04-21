@@ -5,16 +5,87 @@ from torch.autograd import Function
 import numpy as np
 
 
-class DeepMaxEntLoss(nn.Module):
-    # this is a loss
-    def __init__(self):
-        super(DeepMaxEntLoss, self).__init__()
-    def forward(self, input, target):
-        loss = -((target)*(input.log_softmax(0))).mean(0).mean()
-        # # apply softmax to target as well
-        # softmax_target = F.softmax(target, dim=0)
-        # loss = -((softmax_target)*(input.log_softmax(0))).mean(0).mean()
+import torch
+import torch.nn.functional as F
+
+class BalancedBCELoss(nn.Module):
+    def __init__(self, eps: float = 1e-8):
+        super().__init__()
+        self.eps = eps
+
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        """
+        logits:  raw model outputs (before sigmoid)
+        targets: binary labels {0,1}
+        """
+        targets = targets.float()
+
+        n_pos = targets.sum()
+        n_neg = targets.numel() - n_pos
+
+        pos_weight = n_neg / (n_pos + self.eps)
+        pos_weight = pos_weight.to(logits.device, logits.dtype)
+
+        loss = F.binary_cross_entropy_with_logits(
+            logits,
+            targets,
+            pos_weight=pos_weight
+        )
         return loss
+# class DeepMaxEntLoss(nn.Module):
+#     def __init__(self, normalize_target=False, eps=1e-8, pos_weight=None):
+#         """
+#         pos_weight: None or tensor of shape [num_classes]
+#                     Similar to BCEWithLogitsLoss.
+#         """
+#         super(DeepMaxEntLoss, self).__init__()
+#         self.normalize_target = normalize_target
+#         self.eps = eps
+
+#         if pos_weight is not None:
+#             self.register_buffer("pos_weight", pos_weight)
+#         else:
+#             self.pos_weight = None
+
+#     def forward(self, input, target):
+#         """
+#         input:  (B, C) logits
+#         target: (B, C) multi-hot
+#         """
+
+#         if self.pos_weight is not None:
+#             # apply positive weighting per class
+#             target = target * self.pos_weight.unsqueeze(0)
+
+#         if self.normalize_target:
+#             target = target / (target.sum(dim=0, keepdim=True) + self.eps)
+
+#         loss = -(target * input.log_softmax(dim=0)).mean()
+#         return loss
+
+class DeepMaxEntLoss(nn.Module):
+    def __init__(self, eps=1e-8, pos_weight=None):
+        super().__init__()
+        self.eps = eps
+        self.register_buffer("pos_weight", pos_weight if pos_weight is not None else None)
+
+    def forward(self, input, target):
+        # input:  (B,C)
+        # target: (B,C) multi-hot
+
+        w = 1.0
+        if self.pos_weight is not None:
+            w = self.pos_weight.unsqueeze(0)  # (1,C)
+
+        # Only count positive entries in the normalization
+        weighted_target = target * w
+
+        logp = input.log_softmax(dim=0)  # softmax over batch, per class
+        loss_num = -(weighted_target * logp).sum()
+        loss_den = weighted_target.sum().clamp_min(self.eps)
+        return loss_num / loss_den
+
+
 
 class DeepMaxEntModel(nn.Module):
     def __init__(self, input_size: int, hidden_size: int, output_size: int, hidden_nbr: int):
@@ -153,29 +224,88 @@ class deepmaxent_loss_w_bias(nn.Module):
 
 
 
-class PoissonCountAndPresenceLoss(nn.Module):
+class IntegratedLoss(nn.Module):
     ## TODO: Check these parameters
-    def __init__(self, bias_l2=1e-1, pa_w=2.5, 
+    def __init__(self, bias_l2=1e-1, w_pa=2.5, 
                 #  clamp_log_rate=(-10, 10) # numerical stability
-                clamp_log_rate=None
+                clamp_log_rate=None, po_loss='poisson',
+                add_area=False
                  ):
         super().__init__()
         self.bias_l2 = bias_l2
-        self.pa_w = pa_w
+        self.pa_w = w_pa
         self.clamp_log_rate = clamp_log_rate
         self.poisson = nn.PoissonNLLLoss(log_input=True, full=False, reduction="mean")
+        self.deepmaxent = DeepMaxEntLoss(normalize_target=True)
+        self.po_loss = po_loss
+        self.add_area = add_area
 
-    def forward(self, base_raw_po, base_raw_pa, bias_raw, yb_po, yb_pa):
+    def forward(self, base_raw_po, base_raw_pa, bias_raw, yb_po, yb_pa, area_pa):
         # log-rates (raw NN outputs interpreted as log-rate components)
-        log_lambda_po = base_raw_po + bias_raw          # biased rate for Poisson counts
+        log_lambda_po = base_raw_po #+ bias_raw          # biased rate for Poisson counts
         log_lambda_pa = base_raw_pa                     # separate rate for Bernoulli PA
+
+        # check shapes of base_raw_pa and area_pa
+        # print('base_raw_pa shape:', base_raw_pa.shape)
+        # print('area_pa shape:', area_pa.shape)
+
+        if self.add_area:
+            # expand area_pa second dimension to match base_raw_pa shape, then add log(area) to log_lambda_pa
+            # TODO: Check how to add area and base_raw_pa, taking into account area is just a scaling for the loss
+            log_area = np.log(area_pa + 1e-8)  # add small
+            log_lambda_pa = log_lambda_pa + torch.tensor(log_area, dtype=log_lambda_pa.dtype, device=log_lambda_pa.device).unsqueeze(1)  # broadcast to [batch, species]
+
+
+        # # print average raw po and bias, with random chance
+        # if np.random.rand() < 0.01:
+        #     print('avg base_raw_po:', base_raw_po.mean().item())
+        #     print('avg bias_raw:', bias_raw.mean().item())
 
         if self.clamp_log_rate is not None:
             log_lambda_po = log_lambda_po.clamp(*self.clamp_log_rate)
             log_lambda_pa = log_lambda_pa.clamp(*self.clamp_log_rate)
 
-        # 1) Poisson count NLL using λ_po
-        loss_poisson = self.poisson(log_lambda_po, yb_po)
+        # 1) Poisson count NLL using λ_po (TODO: maybe I should try only summing the ones, like in dorazio)
+        if self.po_loss == 'bernoulli':
+            # treat PO counts as Bernoulli presence/absence
+            lambda_po = log_lambda_po.exp()
+            log_p0 = -lambda_po                                        # log P(po=0)
+            log_p1 = torch.log(-torch.expm1(-lambda_po) + 1e-12)       # log P(po=1), stable
+
+            po = (yb_po > 0).to(log_lambda_po.dtype)
+            # loss_poisson = -(po * log_p1 + (1.0 - po) * log_p0).mean()
+            loss_po = -(po * log_p1).mean() # only consider presences
+        elif self.po_loss == 'poisson':   
+            # loss_poisson = self.poisson(log_lambda_po, yb_po)
+            lambda_po = log_lambda_po.exp()
+            bias_soft = torch.nn.functional.softplus(bias_raw)  # convert bias to positive values
+            lambda_po_biased = lambda_po - bias_soft
+            #  lambda_po_biased = lambda_po * bias_prob  # apply bias to rate
+            # loss_poisson = -((yb_po)*(lambda_po_biased.log_softmax(0))).mean(0).mean()
+            loss_po = self.poisson(lambda_po_biased, yb_po)
+        elif self.po_loss == 'deepmaxent':
+            # softmax_lambda = log_lambda_po.log_softmax(0)  # log_softmax over batch dimension to get probabilities
+            # softmax_bias = bias_raw.log_softmax(0)  # bias as log-probabilities, broadcast to species dimension
+            # # print('Shapes softmax_lambda:', softmax_lambda.shape, 'softmax_bias:', softmax_bias.shape)
+            # print('Sample softmax_lambda:', softmax_lambda[:3])
+            # print('Sample softmax_bias:', softmax_bias[:3])
+            # # exit(0)
+
+            # lambda_po = log_lambda_po.exp()
+            # bias_soft = torch.nn.functional.softplus(bias_raw)  # convert bias to positive values
+            # log_lambda_po_biased = log_lambda_po - bias_soft
+            # # loss_po = -((yb_po)*(log_lambda_po_biased.log_softmax(0))).mean()
+            # loss_po = self.deepmaxent(log_lambda_po_biased, yb_po)
+
+            loss_po = self.deepmaxent(log_lambda_po, yb_po)
+
+            # print('Sample bias:', bias_soft[:3])
+
+
+            # loss_po = -((yb_po)*(softmax_lambda + softmax_bias)).mean()
+
+            
+
 
         # 2) Bernoulli PA NLL using p = 1 - exp(-λ_pa)
         lambda_pa = log_lambda_pa.exp()
@@ -188,7 +318,7 @@ class PoissonCountAndPresenceLoss(nn.Module):
         # 3) regularize bias toward 0 => exp(bias) toward 1
         loss_reg = (bias_raw ** 2).mean()
 
-        return loss_poisson + self.pa_w * loss_pa #+ #self.bias_l2 * loss_reg
+        return loss_po + self.pa_w * loss_pa #+ self.bias_l2 * loss_reg
 
 
     

@@ -10,7 +10,8 @@ from shapely.prepared import prep
 from scipy.sparse import coo_matrix, csr_matrix
 
 import ee
-
+from time import time
+import tqdm
 
 # -----------------------------
 # Natural Earth country polygons
@@ -290,6 +291,9 @@ def add_covariates_geoplant_embedding(
 
     # group by year to avoid doing a separate ImageCollection filter per-point
     for yr, grp in base.groupby(year_col, sort=True):
+        start_time_yr = time()
+        print(f"Processing year {yr} with {len(grp)} points...")
+
         # GEE expects Python int
         yr_int = int(yr)
 
@@ -343,6 +347,8 @@ def add_covariates_geoplant_embedding(
 
             all_parts.append(emb_df[["row_id"] + bands])
 
+        print(f"  Year {yr} done in {time() - start_time_yr:.1f}s, missing {total_missing} points so far.")
+
     emb_all = pd.concat(all_parts, ignore_index=True) if all_parts else pd.DataFrame(columns=["row_id"] + bands)
 
     out = (
@@ -353,7 +359,7 @@ def add_covariates_geoplant_embedding(
     )
 
     if total_missing > 0:
-        print(f"⚠️ TOTAL missing embeddings: {total_missing}/{len(base)}")
+        print(f"TOTAL missing embeddings: {total_missing}/{len(base)}")
 
     return out
 
@@ -362,12 +368,20 @@ def add_covariates_geoplant_embedding(
 # Main
 # -----------------------------
 if __name__ == "__main__":
-    country = "Netherlands"
+    start_time = time()
+
+    country = "France"
     pa_path = "data/raw/GeoPlant/PresenceAbsenceSurveys/PA_metadata_train.csv"
     po_path = "data/raw/GeoPlant/PresenceOnlyOccurrences/PO_metadata_train.csv"
 
+    subsample_pa = 1  # set to None to disable subsampling
+    subsample_po = .2  # set to None to disable subsampling
+
+
     # IMPORTANT: keep lon/lat and year in meta so EE calls can be year-aware
-    meta_cols = ["lon", "lat", "year"]
+    meta_cols_pa = ["lon", "lat", "year", "areaInM2"]
+    meta_cols_po = ["lon", "lat", "year"]
+    # subsample = 0.1  # set to None to disable subsampling
 
 
     # ---- Load sparse PA ----
@@ -375,10 +389,10 @@ if __name__ == "__main__":
         pa_path,
         worldmap_region=country,
         species_min_presence=1,
-        meta_cols=meta_cols,
+        meta_cols=meta_cols_pa,
         keep_survey_id=True,
         mainland_only=True,
-        subsample=1
+        subsample=subsample_pa
     )
     print("PA:", Y_pa.shape, "species:", len(sp_pa), "meta rows:", len(X_pa))
 
@@ -387,10 +401,10 @@ if __name__ == "__main__":
         po_path,
         worldmap_region=country,
         species_min_presence=1,
-        meta_cols=meta_cols,
+        meta_cols=meta_cols_po,
         keep_survey_id=True,
         mainland_only=True,
-        subsample=1
+        subsample=subsample_po
     )
     print("PO:", Y_po.shape, "species:", len(sp_po), "meta rows:", len(X_po))
 
@@ -406,7 +420,7 @@ if __name__ == "__main__":
     X_po_cov = add_covariates_geoplant_embedding(X_po, year_col="year")
 
     # ---- Save outputs ----
-    outdir = f"data/processed/geoplant/{country.lower()}_sparse"
+    outdir = f"data/processed/geoplant/{country.lower()}_sparse_{subsample_pa}_{subsample_po}"
     os.makedirs(outdir, exist_ok=True)
 
     # Save matrices as .npz (recommended for sparse)
@@ -430,9 +444,15 @@ if __name__ == "__main__":
     # Save species column names (aligned to matrix columns)
     pd.Series(common_species).to_csv(os.path.join(outdir, f"species_{country.lower()}.csv"), index=False, header=False)
 
+    # Save covariate names
+    cov_cols = [c for c in X_pa_cov.columns if c.startswith("A")]
+    pd.Series(cov_cols).to_csv(os.path.join(outdir, f"covariates_{country.lower()}.csv"), index=False, header=False)
+
     # ---- Example: access first row / a species ----
     print("First PA row nonzeros:", Y_pa_i[0, :].nonzero()[1][:20])
     if common_species:
         sp = common_species[0]
         col = get_species_column(Y_pa_i, common_species, sp)
         print("Example species:", sp, "presence count:", int(col.sum()))
+
+    print(f"Done in {time() - start_time:.1f} seconds.")

@@ -522,6 +522,7 @@ if __name__ == "__main__":
         "lon", "lat"
     ]
 
+
     # pa_df, pa_species_cols = load_geoplant_dataset(pa_data_dir, species_min_presence=20, meta_cols=meta_cols, sample_fraction=1, worldmap_region=filter)
     # po_df, po_species_cols = load_geoplant_dataset(po_data_dir, species_min_presence=20, meta_cols=meta_cols, sample_fraction=1, worldmap_region=filter)
 

@@ -28,7 +28,7 @@ from sklearn.cluster import KMeans
 from src.model_training import smooth_targets_v3
 
 # --- your models & loss
-from src.models import DeepMaxEntModel, DeepMaxEntLoss, DeepMaxEntPlotBias, deepmaxent_domain, grad_reverse, DomainDiscriminator, DeepMaxentTwoHead, SDMWithBias, deepmaxent_loss_w_bias, PoissonCountAndPresenceLoss
+from src.models import DeepMaxEntModel, DeepMaxEntLoss, DeepMaxEntPlotBias, deepmaxent_domain, grad_reverse, DomainDiscriminator, DeepMaxentTwoHead, SDMWithBias, deepmaxent_loss_w_bias, IntegratedLoss
 
 
 # NEW: TabPFN
@@ -790,7 +790,7 @@ def run_experiment_popa_bias(
         # criterion_pa = deepmaxent_loss()#torch.nn.BCEWithLogitsLoss()
 
         model.train()
-        loss_fn = PoissonCountAndPresenceLoss()
+        loss_fn = IntegratedLoss()
         for epoch in range(1, epochs + 1):
             running_loss = 0.0
             for (xb_po, zb_po, yb_po), (xb_pa, yb_pa, _) in zip(po_loader, pa_loader):

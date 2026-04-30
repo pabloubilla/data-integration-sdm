@@ -14,3 +14,4 @@ wandb/
 figures_presentation/
 bias_map_PO
 .Rproj.user
+outputs/

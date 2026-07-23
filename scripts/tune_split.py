@@ -34,22 +34,22 @@ from isdm.splits import run_one_split_pa, run_one_split_popa  # reuse existing f
 #  Hyperparameter grid — edit this to taste
 # ─────────────────────────────────────────────
 PARAM_GRID_PA = {
-    "lr":           [1e-3, 1e-4],
+    "lr":           [1e-4],
     "weight_decay": [1e-4, 1e-3],
-    "hidden_dim":   [128, 512],
-    "hidden_layers": [1, 2],
-    "batch_size": [126, 500], 
-    "epochs": [10, 50, 100], 
+    "hidden_dim":   [128],
+    "hidden_layers": [2],
+    "batch_size": [500], 
+    "epochs": [10, 20, 30], 
 }
 
 PARAM_GRID_PO_PA = {
-    "lr":           [1e-3, 1e-4],
-    "weight_decay": [1e-4, 1e-3],
-    "hidden_dim":   [128, 512],
-    "hidden_layers": [1, 2],
-    "batch_size": [126, 500], 
-    "epochs": [10, 50, 100], 
-    "w_pa": [.5, 1, 2],  # relative weight of PA loss vs PO loss
+    "lr":           [1e-4],
+    "weight_decay": [1e-3],
+    "hidden_dim":   [128],
+    "hidden_layers": [2],
+    "batch_size": [126], 
+    "epochs": [10, 20, 30], 
+    "w_pa": [.5, 2],  # relative weight of PA loss vs PO loss
 }
 
 # Fixed across all trials
@@ -118,12 +118,12 @@ def pivot_auc_by_option(df: pd.DataFrame) -> pd.DataFrame:
 
 def main(test_number: int):
 
-    run_pa = False
+    run_pa = True
     run_popa = True
 
     set_all_seeds(FIXED["seed"])
 
-    data_path  = "data/processed/geoplant/france"
+    data_path  = "data/processed/GeoPlant/france"
     split_dir  = Path("outputs/splits/france")
     output_dir = Path(f"outputs/tune/test_{test_number}")
     output_dir.mkdir(parents=True, exist_ok=True)

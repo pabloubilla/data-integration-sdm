@@ -62,7 +62,7 @@ def load_geoplant_processed(
     species = [str(int(x)) for x in vocab.tolist()]
 
     if add_coordinates:
-        covariates = covariates + ["lon", "lat"]
+        covariates = covariates + ["lon", "lat"] 
 
     X_po = X_po[covariates].copy()
     X_pa_train = X_pa_train[covariates].copy()

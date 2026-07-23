@@ -12,6 +12,29 @@ except ImportError:
     KMeansConstrained = None
 
 
+from pathlib import Path
+from functools import partial
+import json
+import pickle
+
+import numpy as np
+import pandas as pd
+import torch
+import wandb
+
+from sklearn.preprocessing import StandardScaler
+from torch.utils.data import DataLoader
+from torch import nn
+
+from isdm.load_data import load_geoplant_processed
+from isdm.datasets import MultiLabelDataset, collate_multilabel
+from isdm.models import MLP, BalancedBCELoss, DeepMaxEntLoss, BernoulliFromLogRateLoss, IntegratedLoss
+from isdm.train import train_single_source, train_double_source
+from isdm.evaluation import predict_logits, per_species_auc_sparse, per_site_auc_sparse, LogitsStore
+from isdm.utils import get_overlapping_species_subset, set_all_seeds, get_device, filter_and_remap
+
+
+
 SplitOption = Literal["closest", "middle", "farthest"]
 DistanceMetric = Literal["euclidean", "mahalanobis"]
 
@@ -111,6 +134,7 @@ def make_size_constrained_clusters(
     covariates: list[str],
     n_clusters: int,
     seed: int,
+    size_range:int = 10 # defines a range to make the problem less tight (Kmeans)
 ) -> np.ndarray:
     """
     Size-constrained KMeans labels.
@@ -125,8 +149,8 @@ def make_size_constrained_clusters(
     n_clusters = min(n_clusters, max(1, n // 10))
 
     avg = n / n_clusters
-    size_min = int(np.floor(avg))
-    size_max = int(np.ceil(avg))
+    size_min = int(np.floor(avg)) - size_range
+    size_max = int(np.ceil(avg)) + size_range
 
     print(
         f"Generating {n_clusters} constrained clusters "
@@ -324,7 +348,668 @@ def load_split_specs(split_dir: str | Path) -> pd.DataFrame:
     return pd.read_csv(split_dir / "splits.csv")
 
 
-def load_split_indices(split_dir: str | Path, split_file: str) -> tuple[np.ndarray, np.ndarray]:
+def load_split(split_dir: str | Path, split_file: str):
     split_dir = Path(split_dir)
     arr = np.load(split_dir / split_file)
-    return arr["train_idx"], arr["test_idx"]
+    print(arr)
+    return arr #arr["train_idx"], arr["test_idx"]
+
+
+def subset_list(xs, idx):
+    return [xs[int(i)] for i in idx]
+
+
+def make_loader(X, y_lists, num_classes: int, batch_size: int, shuffle: bool):
+    ds = MultiLabelDataset(X, y_lists)
+
+    return DataLoader(
+        ds,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        num_workers=4,
+        pin_memory=torch.cuda.is_available(),
+        collate_fn=partial(collate_multilabel, num_classes=num_classes),
+    )
+
+
+# TODO: Check for the overlap between species, it should apply to both PO and PA and integrated splits.
+def run_one_split_pa(
+    *,
+    split_row,
+    split_dir: Path,
+    data,
+    output_dir: Path,
+    project_name: str,
+    seed: int, 
+    batch_size: int,
+    epochs: int,
+    lr: float,
+    weight_decay: float,
+    hidden_dim: int,
+    hidden_layers: int,
+    criterion = BalancedBCELoss(), 
+    use_overlapping_species: bool = True,
+):
+    split = load_split(split_dir, split_row["split_file"])
+
+    train_idx, test_idx = split["train_idx"], split["test_idx"]
+    overlapping_species_list = split['species_list']
+
+    if use_overlapping_species:
+        species = overlapping_species_list
+    else:
+        species = data.species
+
+    X_all = data.X_pa_train.reset_index(drop=True)
+    y_all = data.y_pa_train
+
+    covariates = data.covariates
+    num_classes = len(species)
+
+    X_train_df = X_all.iloc[train_idx].copy()
+    X_test_df = X_all.iloc[test_idx].copy()
+
+
+
+    y_train = subset_list(y_all, train_idx)
+    y_test = subset_list(y_all, test_idx)
+
+    if use_overlapping_species:
+        y_train = filter_and_remap(overlapping_species_list, y_train)
+        y_test = filter_and_remap(overlapping_species_list, y_test)
+    
+    # print(f'Original num_classes (global species): {num_classes}')
+    # y_train, y_test, _, num_classes = get_overlapping_species_subset(y_train, y_test, num_classes=num_classes)
+    # print(f"Num classes after restricting to overlapping species: {num_classes}")
+
+    scaler = StandardScaler().fit(X_train_df[covariates])
+
+    X_train = scaler.transform(X_train_df[covariates]).astype(np.float32)
+    X_test = scaler.transform(X_test_df[covariates]).astype(np.float32)
+
+    # y_train, y_test, global_species, num_classes = \
+    #     get_overlapping_species_subset(y_train_global, y_test_global, num_classes=global_num_classes)
+
+    train_loader = make_loader(
+        X_train,
+        y_train,
+        num_classes=num_classes,
+        batch_size=batch_size,
+        shuffle=True,
+    )
+
+    # no separate val here; this is split-sweep evaluation
+    val_loader = None
+
+    # check device including mps
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+    elif torch.backends.mps.is_available():
+        device = torch.device("mps")
+    else:
+        device = torch.device("cpu")
+
+    model = MLP(
+        input_size=len(covariates),
+        output_size=num_classes,
+        hidden_size=hidden_dim,
+        hidden_layers=hidden_layers,
+    )
+
+    run = wandb.init(
+        project=project_name,
+        name=f"pa_split_{split_row['split_id']}",
+        reinit=True,
+        config={
+            "experiment_name": "pa_split_sweep",
+            "split_id": split_row["split_id"],
+            "split_option": split_row["option"],
+            "split_distance": float(split_row["distance"]),
+            "train_size": int(split_row["train_size"]),
+            "test_size": int(split_row["test_size"]),
+            "source_name": "pa",
+            "model_name": "mlp_multilabel",
+            "loss_name": "balanced_bce",
+            "epochs": epochs,
+            "batch_size": batch_size,
+            "lr": lr,
+            "weight_decay": weight_decay,
+            "hidden_dim": hidden_dim,
+            "hidden_layers": hidden_layers,
+            "num_species": num_classes,
+            "num_covariates": len(covariates),
+            "seed": seed
+        },
+    )
+
+    history = train_single_source(
+        model=model,
+        criterion=criterion,
+        # criterion = nn.BCEWithLogitsLoss(),
+        train_loader=train_loader,
+        val_loader=val_loader,
+        device=device,
+        epochs=epochs,
+        lr=lr,
+        weight_decay=weight_decay,
+        wandb_run=run,
+    )
+
+    logits = predict_logits(model, X_test, device=device)
+    aucs_species = per_species_auc_sparse(
+        logits=logits,
+        y_lists=y_test,
+        num_classes=num_classes,
+    )
+    # report how many species are not nan
+    print(f"Number of species with valid AUC: {sum(~np.isnan(list(aucs_species.values())))} / {num_classes}")
+    avg_auc_species = float(np.nanmean(list(aucs_species.values())))
+
+    wandb.log({"test/avg_auc_species": avg_auc_species})
+    print(
+        f"{split_row['split_id']} | "
+        f"distance={split_row['distance']:.4f} | "
+        f"avg_auc_species={avg_auc_species:.4f}"
+    )
+
+    aucs_site = per_site_auc_sparse(
+        logits=logits,
+        y_lists=y_test,
+        num_classes=num_classes,
+    )
+    # report how many sites are not nan
+    print(f"Number of sites with valid AUC: {sum(~np.isnan(list(aucs_site.values())))} / {len(y_test)}")
+    avg_auc_site = float(np.nanmean(list(aucs_site.values())))
+
+    wandb.log({"test/avg_auc_site": avg_auc_site})
+    print(
+        f"{split_row['split_id']} | "
+        f"distance={split_row['distance']:.4f} | "
+        f"avg_auc_site={avg_auc_site:.4f}"
+    )
+
+    exp_dir = output_dir / split_row["split_id"]
+    exp_dir.mkdir(parents=True, exist_ok=True)
+
+    torch.save(model.state_dict(), exp_dir / "model.pt")
+
+    with open(exp_dir / "scaler.pkl", "wb") as f:
+        pickle.dump(scaler, f)
+
+    with open(exp_dir / "history.json", "w") as f:
+        json.dump(history, f, indent=2)
+
+    with open(exp_dir / "metrics.json", "w") as f:
+        json.dump(
+            {
+                "avg_auc_species": avg_auc_species,
+                "split_distance": float(split_row["distance"]),
+                "aucs": {
+                    str(k): None if np.isnan(v) else float(v)
+                    for k, v in aucs_species.items()
+                },
+            },
+            f,
+            indent=2,
+        )
+
+    run.finish()
+
+    return {
+        "source": "pa",
+        "split_id": split_row["split_id"],
+        "option": split_row["option"],
+        "distance": float(split_row["distance"]),
+        "train_size": int(split_row["train_size"]),
+        "test_size": int(split_row["test_size"]),
+        "avg_auc_species": avg_auc_species,
+        "avg_auc_site": avg_auc_site,
+        "test_number": int(split_row["test_number"]),
+        "logits": None,
+        "y_test": y_test,
+    }
+
+def run_one_split_popa(
+    *,
+    split_row,
+    split_dir: Path,
+    data,
+    output_dir: Path,
+    project_name: str,
+    seed: int,
+    batch_size: int,
+    epochs: int,
+    lr: float,
+    weight_decay: float,
+    hidden_dim: int,
+    hidden_layers: int,
+    w_po: float = 1.0,
+    w_pa: float = 1.0,
+    criterion_po = DeepMaxEntLoss(),
+    criterion_pa = BalancedBCELoss(),
+    concat_sources: bool = False,
+    return_logits: bool = False,
+    add_po_cov: bool = False,
+    use_overlapping_species: bool = True,
+):
+    split = load_split(split_dir, split_row["split_file"])
+
+    train_idx, test_idx = split["train_idx"], split["test_idx"]
+    overlapping_species_list = split['species_list']
+    if use_overlapping_species:
+        species = overlapping_species_list
+    else:
+        species = data.species
+
+    covariates = data.covariates
+    num_classes = len(species)
+
+
+    device = get_device()
+
+    # -------------------------
+    # PO source: all PO
+    # -------------------------
+    X_po_df = data.X_po.reset_index(drop=True)
+    y_po = data.y_po
+
+    if use_overlapping_species:
+        y_po = filter_and_remap(overlapping_species_list, y_po)
+
+    # -------------------------
+    # PA source: split-specific PA train/test
+    # -------------------------
+    X_pa_all = data.X_pa_train.reset_index(drop=True)
+    y_pa_all = data.y_pa_train
+
+    X_pa_train_df = X_pa_all.iloc[train_idx].copy()
+    X_pa_test_df = X_pa_all.iloc[test_idx].copy()
+
+    y_pa_train = subset_list(y_pa_all, train_idx)
+    y_pa_test = subset_list(y_pa_all, test_idx)
+
+    if use_overlapping_species:
+        y_pa_train = filter_and_remap(overlapping_species_list, y_pa_train)
+        y_pa_test = filter_and_remap(overlapping_species_list, y_pa_test)
+
+    if add_po_cov:
+        X_po_df['PO'] = 1
+        X_pa_train_df['PO'] = 0
+        X_pa_test_df['PO'] = 0
+        covariates = covariates + ['PO']
+
+    # -------------------------
+    # Fit scaler on PO + PA train
+    # -------------------------
+    scaler = StandardScaler().fit(
+        pd.concat(
+            [
+                X_po_df[covariates],
+                X_pa_train_df[covariates],
+            ],
+            axis=0,
+        )
+    )
+
+    X_po = scaler.transform(X_po_df[covariates]).astype(np.float32)
+    X_pa_train = scaler.transform(X_pa_train_df[covariates]).astype(np.float32)
+    X_pa_test = scaler.transform(X_pa_test_df[covariates]).astype(np.float32)
+
+    po_loader = make_loader(
+        X_po,
+        y_po,
+        num_classes=num_classes,
+        batch_size=batch_size,
+        shuffle=True,
+    )
+
+    pa_loader = make_loader(
+        X_pa_train,
+        y_pa_train,
+        num_classes=num_classes,
+        batch_size=batch_size,
+        shuffle=True,
+    )
+
+    model = MLP(
+        input_size=len(covariates),
+        output_size=num_classes,
+        hidden_size=hidden_dim,
+        hidden_layers=hidden_layers,
+    )
+
+    criterion = IntegratedLoss(
+        source1_loss=criterion_po,
+        source2_loss=criterion_pa,
+        source1_weight=w_po,
+        source2_weight=w_pa,
+        bias_weight=0.0,
+        clamp_source1=(-10, 10),
+        clamp_source2=(-10, 10),
+        concat_sources=concat_sources,
+    )
+
+    run = wandb.init(
+        project=project_name,
+        name=f"popa_split_{split_row['split_id']}",
+        reinit=True,
+        config={
+            "experiment_name": "popa_split_sweep",
+            "split_id": split_row["split_id"],
+            "split_option": split_row["option"],
+            "split_distance": float(split_row["distance"]),
+            "test_number": int(split_row["test_number"]),
+            "source1_name": "po",
+            "source2_name": "pa",
+            "model_name": "mlp_multilabel",
+            "loss_name": "integrated_deepmaxent_bernoulli_rate",
+            "po_loss": "deepmaxent",
+            "pa_loss": "bernoulli_from_log_rate",
+            "w_po": w_po,
+            "w_pa": w_pa,
+            "epochs": epochs,
+            "batch_size": batch_size,
+            "lr": lr,
+            "weight_decay": weight_decay,
+            "hidden_dim": hidden_dim,
+            "hidden_layers": hidden_layers,
+            "num_species": num_classes,
+            "num_covariates": len(covariates),
+            "seed": seed,
+        },
+    )
+
+    history = train_double_source(
+        model=model,
+        criterion=criterion,
+        source1_loader=po_loader,
+        source2_loader=pa_loader,
+        device=device,
+        epochs=epochs,
+        lr=lr,
+        weight_decay=weight_decay,
+        wandb_run=run,
+        source1_name="po",
+        source2_name="pa",
+        cycle_shorter_loader=True,
+        max_steps_per_epoch=len(pa_loader),  # one epoch = one pass through PA train data
+    )
+
+    logits = predict_logits(model, X_pa_test, device=device)
+
+    aucs_species = per_species_auc_sparse(
+        logits=logits,
+        y_lists=y_pa_test,
+        num_classes=num_classes,
+    )
+
+    valid_species = int(sum(~np.isnan(list(aucs_species.values()))))
+    avg_auc_species = float(np.nanmean(list(aucs_species.values())))
+
+    wandb.log(
+        {
+            "test/avg_auc_species": avg_auc_species,
+            "test/valid_species_auc": valid_species,
+        }
+    )
+
+    aucs_site = per_site_auc_sparse(
+        logits=logits,
+        y_lists=y_pa_test,
+        num_classes=num_classes,
+    )
+    # report how many sites are not nan
+    print(f"Number of sites with valid AUC: {sum(~np.isnan(list(aucs_site.values())))} / {len(y_pa_test)}")
+    avg_auc_site = float(np.nanmean(list(aucs_site.values())))
+
+    wandb.log({"test/avg_auc_site": avg_auc_site})
+
+    print(
+        f"PO+PA | {split_row['split_id']} | "
+        f"distance={split_row['distance']:.4f} | "
+        f"avg_auc_site={avg_auc_site:.4f} | "
+        f"valid_species={valid_species}/{num_classes}"
+    )
+
+    exp_dir = output_dir / "popa_split_sweep" / split_row["split_id"]
+    exp_dir.mkdir(parents=True, exist_ok=True)
+
+    torch.save(model.state_dict(), exp_dir / "model.pt")
+
+    with open(exp_dir / "scaler.pkl", "wb") as f:
+        pickle.dump(scaler, f)
+
+    with open(exp_dir / "history.json", "w") as f:
+        json.dump(history, f, indent=2)
+
+    with open(exp_dir / "metrics.json", "w") as f:
+        json.dump(
+            {
+                "avg_auc_species": avg_auc_species,
+                "valid_species_auc": valid_species,
+                "split_distance": float(split_row["distance"]),
+                "aucs": {
+                    str(k): None if np.isnan(v) else float(v)
+                    for k, v in aucs_species.items()
+                },
+            },
+            f,
+            indent=2,
+        )
+
+    run.finish()
+
+    return {
+        "source": "popa",
+        "split_id": split_row["split_id"],
+        "option": split_row["option"],
+        "distance": float(split_row["distance"]),
+        "train_size": int(split_row["train_size"]),
+        "test_size": int(split_row["test_size"]),
+        "test_number": int(split_row["test_number"]),
+        "avg_auc_species": avg_auc_species,
+        "avg_auc_site": avg_auc_site,
+        "valid_species_auc": valid_species,
+        "logits": logits if return_logits else None,
+        "y_test": y_pa_test,
+    }
+
+
+
+
+# TODO: For results with PO-only model check the intersection part
+def train_po_for_splits(
+    *,
+    data,
+    output_dir: Path,
+    project_name: str,
+    seed: int,
+    batch_size: int,
+    epochs: int,
+    lr: float,
+    weight_decay: float,
+    hidden_dim: int,
+    hidden_layers: int,
+    criterion = DeepMaxEntLoss(),
+    use_overlapping_species: bool = True
+):
+    print("\n=== Training one PO-only model on all PO data ===")
+
+    covariates = data.covariates
+    num_classes = len(data.species)
+    device = get_device()
+
+    X_po_df = data.X_po.reset_index(drop=True)
+    y_po = data.y_po
+
+    scaler = StandardScaler().fit(X_po_df[covariates])
+    X_po = scaler.transform(X_po_df[covariates]).astype(np.float32)
+
+    train_loader = make_loader(
+        X_po,
+        y_po,
+        num_classes=num_classes,
+        batch_size=batch_size,
+        shuffle=True,
+    )
+
+    model = MLP(
+        input_size=len(covariates),
+        output_size=num_classes,
+        hidden_size=hidden_dim,
+        hidden_layers=hidden_layers,
+    )
+
+
+    run = wandb.init(
+        project=project_name,
+        name="po_only_all_po",
+        reinit=True,
+        config={
+            "experiment_name": "po_only_all_po_split_eval",
+            "source_name": "po",
+            "model_name": "mlp_multilabel",
+            "loss_name": "",
+            "epochs": epochs,
+            "batch_size": batch_size,
+            "lr": lr,
+            "weight_decay": weight_decay,
+            "hidden_dim": hidden_dim,
+            "hidden_layers": hidden_layers,
+            "num_species": num_classes,
+            "num_covariates": len(covariates),
+            "seed": seed,
+        },
+    )
+
+    history = train_single_source(
+        model=model,
+        criterion=criterion,
+        train_loader=train_loader,
+        val_loader=None,
+        device=device,
+        epochs=epochs,
+        lr=lr,
+        weight_decay=weight_decay,
+        wandb_run=run,
+    )
+
+    exp_dir = output_dir / "po_only_all_po"
+    exp_dir.mkdir(parents=True, exist_ok=True)
+
+    torch.save(model.state_dict(), exp_dir / "model.pt")
+
+    with open(exp_dir / "scaler.pkl", "wb") as f:
+        pickle.dump(scaler, f)
+
+    with open(exp_dir / "history.json", "w") as f:
+        json.dump(history, f, indent=2)
+
+    run.finish()
+
+    return model, scaler
+
+def evaluate_model_on_all_pa_split_tests(
+    *,
+    model,
+    scaler,
+    split_table: pd.DataFrame,
+    split_dir: Path,
+    data,
+    output_dir: Path,
+    project_name: str,
+    source_name: str,
+    use_overlapping_species: bool = True,
+) -> tuple[pd.DataFrame, LogitsStore]:
+    """
+    Returns:
+        summary  — lightweight DataFrame of scalar metrics (CSV-ready)
+        store    — LogitsStore with logits + y_lists (save separately as .npz)
+    """
+    covariates = data.covariates
+    num_classes = len(data.species)
+    device = get_device()
+
+    model.to(device)
+    model.eval()
+
+    X_all = data.X_pa_train.reset_index(drop=True)
+    y_all = data.y_pa_train
+
+    results = []
+    store = LogitsStore()
+
+    # run = wandb.init(
+    #     project=project_name,
+    #     name=f"{source_name}_eval_all_pa_splits",
+    #     reinit=True,
+    #     config={
+    #         "experiment_name": f"{source_name}_eval_all_pa_splits",
+    #         "source_name": source_name,
+    #         "model_name": model.__class__.__name__,
+    #         "num_species": num_classes,
+    #         "num_covariates": len(covariates),
+    #     },
+    # )
+
+    for _, split_row in split_table.iterrows():
+        # TODO adapt to new split
+        split = load_split(split_dir, split_row["split_file"])
+
+        train_idx, test_idx = split["train_idx"], split["test_idx"]
+        overlapping_species_list = split['species_list']
+
+
+        X_test_df = X_all.iloc[test_idx].copy()
+        y_test = subset_list(y_all, test_idx)
+        # for y_test only keep species in overlapping_species_list (without remapping)
+        # this might not be the best way to do it, it still trains a big model for PO
+        if use_overlapping_species: y_test = [[s for s in obs if s in overlapping_species_list] for obs in y_test]
+
+        X_test = scaler.transform(X_test_df[covariates]).astype(np.float32)
+
+        logits = predict_logits(model, X_test, device=device)
+        aucs_species = per_species_auc_sparse(logits=logits, y_lists=y_test, num_classes=num_classes)
+
+        valid_species = int(sum(~np.isnan(list(aucs_species.values()))))
+        avg_auc_species = float(np.nanmean(list(aucs_species.values())))
+
+        aucs_site = per_site_auc_sparse(logits=logits, y_lists=y_test, num_classes=num_classes)
+        avg_auc_site = float(np.nanmean(list(aucs_site.values())))
+
+        # scalars only in results
+        results.append({
+            "source": source_name,
+            "split_id": split_row["split_id"],
+            "option": split_row["option"],
+            "distance": float(split_row["distance"]),
+            "train_size": int(split_row["train_size"]),
+            "test_size": int(split_row["test_size"]),
+            "test_number": int(split_row["test_number"]),
+            "avg_auc_species": avg_auc_species,
+            "avg_auc_site": avg_auc_site,
+
+            "valid_species_auc": valid_species,
+        })
+
+        # arrays go directly into the store
+        store.add(
+            split_id=split_row["split_id"],
+            option=split_row["option"],
+            distance=float(split_row["distance"]),
+            test_number=int(split_row["test_number"]),
+            logits=logits,
+            y_lists=y_test,
+        )
+
+        
+
+    # run.finish()
+
+    summary = pd.DataFrame(results)
+    summary.to_csv(output_dir / f"summary_{source_name}.csv", index=False)
+
+    return summary, store
+
+
+

@@ -168,6 +168,7 @@ def train_double_source(
     source2_name: str = "source2",
     grad_clip_norm: Optional[float] = None,
     cycle_shorter_loader: bool = True,
+    max_steps_per_epoch: Optional[int] = None
 ) -> Dict[str, list]:
 
     model.to(device)
@@ -216,6 +217,10 @@ def train_double_source(
 
         else:
             iterator = zip(source1_loader, source2_loader)
+        
+        # Cap steps regardless of which branch was taken
+        if max_steps_per_epoch is not None:
+            iterator = itertools.islice(iterator, max_steps_per_epoch)
 
         for batch1, batch2 in iterator:
             xb1, yb1 = batch1

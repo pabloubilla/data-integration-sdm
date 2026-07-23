@@ -4,15 +4,18 @@ import torch.nn.functional as F
 from torch.autograd import Function
 import numpy as np
 
+from typing import Optional
 
 import torch
 import torch.nn.functional as F
 
 ## Balanced Binary Cross-Entropy Loss: automatically balances to be 50-50
 class BalancedBCELoss(nn.Module):
-    def __init__(self, eps: float = 1e-8):
+    def __init__(self, eps: float = 1e-8, clamp = None, log_ratio = False):
         super().__init__()
         self.eps = eps
+        self.clamp = clamp
+        self.log_ratio = log_ratio
 
     def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
         """
@@ -27,12 +30,19 @@ class BalancedBCELoss(nn.Module):
         pos_weight = n_neg / (n_pos + self.eps)
         pos_weight = pos_weight.to(logits.device, logits.dtype)
 
+        if self.log_ratio:
+            pos_weight = 1 + torch.log(pos_weight + 1)
+
+        if self.clamp is not None:
+            pos_weight = pos_weight.clamp(max=self.clamp)
+
         loss = F.binary_cross_entropy_with_logits(
             logits,
             targets,
             pos_weight=pos_weight
         )
         return loss
+
 
 ## DeepMaxEntLoss: Based on Ryckewaert
 class DeepMaxEntLoss(nn.Module):
@@ -45,16 +55,18 @@ class DeepMaxEntLoss(nn.Module):
         # input:  (B,C)
         # target: (B,C) multi-hot
 
-        w = 1.0
-        if self.pos_weight is not None:
-            w = self.pos_weight.unsqueeze(0)  # (1,C)
+        # w = 1.0
+        # if self.pos_weight is not None:
+        #     w = self.pos_weight.unsqueeze(0)  # (1,C)
 
-        # Only count positive entries in the normalization
-        weighted_target = target * w
+        # # Only count positive entries in the normalization
+        # weighted_target = target * w
+
+        normalized_target = target / target.sum(dim=0).clamp_min(self.eps)
 
         logp = input.log_softmax(dim=0)  # softmax over batch, per class
-        loss_num = -(weighted_target * logp).sum()
-        loss_den = weighted_target.sum().clamp_min(self.eps)
+        loss_num = -(normalized_target * logp).sum()
+        loss_den = len(target)  # normalized_target.sum().clamp_min(self.eps)
         return loss_num / loss_den
 
 
@@ -155,6 +167,125 @@ class DeepMaxentLossBias(nn.Module):
         return poisson + self.bias_l2 * reg
 
 
+# class BernoulliFromLogRateLoss(nn.Module):
+#     """
+#     Bernoulli likelihood induced by an Inhomogeneous Poisson Process (IPP):
+
+#         lambda = exp(log_lambda)
+#         P(y=1) = 1 - exp(-lambda * area)
+#         P(y=0) = exp(-lambda * area)
+
+#     The area term accounts for the spatial domain over which the Poisson
+#     process is integrated.  A larger area increases the probability of at
+#     least one event (y=1) for a given rate lambda.
+
+#     Args:
+#         positive_only:  If True, only penalise false negatives (ignore true
+#                         negatives).  Mutually exclusive with balance_pos.
+#         eps:            Small constant for numerical stability.
+#         balance_pos:    If True, up-weight positive samples so that positive
+#                         and negative classes contribute equally to the loss,
+#                         regardless of class imbalance.  Mutually exclusive
+#                         with positive_only.
+#         area:           Optional fixed area scalar applied to every sample.
+#                         Can be overridden per-call via the `area` argument in
+#                         forward().  Defaults to 1.0 (no scaling).
+#     """
+
+#     def __init__(
+#         self,
+#         positive_only: bool = False,
+#         eps: float = 1e-12,
+#         balance_pos: bool = False,
+#         area: float = 700,
+#     ):
+#         super().__init__()
+#         if positive_only and balance_pos:
+#             raise ValueError(
+#                 "`positive_only` and `balance_pos` are mutually exclusive: "
+#                 "balancing requires both positive and negative loss terms."
+#             )
+#         if area <= 0:
+#             raise ValueError(f"`area` must be positive, got {area}.")
+
+#         self.positive_only = positive_only
+#         self.eps = eps
+#         self.balance_pos = balance_pos
+#         self.register_buffer("default_area", torch.tensor(area, dtype=torch.float32))
+
+#     def _resolve_area(
+#         self,
+#         log_lambda: torch.Tensor,
+#         area: Optional[torch.Tensor],
+#     ) -> torch.Tensor:
+#         """
+#         Return an area tensor broadcastable against log_lambda.
+
+#         Priority: per-call `area` argument > constructor default.
+#         """
+#         if area is not None:
+#             area = torch.as_tensor(area, dtype=log_lambda.dtype, device=log_lambda.device)
+#             if area.dim() == 0:
+#                 pass  # scalar — broadcasts freely
+#             elif area.shape != log_lambda.shape:
+#                 raise ValueError(
+#                     f"Per-sample `area` shape {area.shape} does not match "
+#                     f"`log_lambda` shape {log_lambda.shape}."
+#                 )
+#             if (area <= 0).any():
+#                 raise ValueError("All `area` values must be positive.")
+#             return area
+
+#         return self.default_area.to(dtype=log_lambda.dtype, device=log_lambda.device)
+
+#     def forward(
+#         self,
+#         log_lambda: torch.Tensor,
+#         target: torch.Tensor,
+#         area: Optional[torch.Tensor] = None,
+#     ) -> torch.Tensor:
+#         """
+#         Args:
+#             log_lambda: Log-rate predictions, shape (N, ...).
+#             target:     Binary targets (0 or 1), same shape as log_lambda.
+#             area:       Optional area override.  Either:
+#                           - a scalar (float or 0-d tensor) applied to all samples, or
+#                           - a tensor with the same shape as log_lambda for per-sample areas.
+#                         If None, falls back to the `area` value passed at construction.
+#         """
+#         target = target.to(log_lambda.dtype)
+#         area = self._resolve_area(log_lambda, area)
+
+#         # Effective integrated intensity: lambda * area
+#         lambda_ = torch.exp(log_lambda) * area
+
+#         log_p0 = -lambda_                                       # log P(y=0)
+#         log_p1 = torch.log(-torch.expm1(-lambda_) + self.eps)  # log P(y=1)
+
+#         if self.positive_only:
+#             loss = -(target * log_p1)
+#             return loss.mean()
+
+#         # Full Bernoulli NLL
+#         loss = -(target * log_p1 + (1.0 - target) * log_p0)
+
+#         if self.balance_pos:
+#             n_pos = target.sum()
+#             n_neg = target.numel() - n_pos
+
+#             pos_weight = (n_neg / (n_pos + self.eps)).to(
+#                 device=log_lambda.device, dtype=log_lambda.dtype
+#             )
+
+#             # Per-element weights: pos_weight for positives, 1 for negatives.
+#             weight = target * pos_weight + (1.0 - target)
+
+#             # Normalise by total weight so loss scale is stable across class ratios.
+#             return (loss * weight).sum() / weight.sum()
+
+#         return loss.mean()
+    
+
 class BernoulliFromLogRateLoss(nn.Module):
     """
     Bernoulli likelihood induced by Poisson intensity:
@@ -164,24 +295,64 @@ class BernoulliFromLogRateLoss(nn.Module):
         P(y=0) = exp(-lambda)
 
     Useful for presence/absence when model outputs log-rate.
+
+    Args:
+        positive_only:  If True, only penalise false negatives (ignore true
+                        negatives).  Mutually exclusive with balance_pos.
+        eps:            Small constant for numerical stability.
+        balance_pos:    If True, up-weight positive samples so that positive
+                        and negative classes contribute equally to the loss,
+                        regardless of class imbalance.  Mutually exclusive
+                        with positive_only.
     """
 
-    def __init__(self, positive_only: bool = False, eps: float = 1e-12):
+    def __init__(
+        self,
+        positive_only: bool = False,
+        eps: float = 1e-12,
+        balance_pos: bool = False,
+    ):
         super().__init__()
+        if positive_only and balance_pos:
+            raise ValueError(
+                "`positive_only` and `balance_pos` are mutually exclusive: "
+                "balancing requires both positive and negative loss terms."
+            )
         self.positive_only = positive_only
         self.eps = eps
+        self.balance_pos = balance_pos
 
-    def forward(self, log_lambda, target):
+    def forward(self, log_lambda: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         target = target.to(log_lambda.dtype)
 
         lambda_ = torch.exp(log_lambda)
-        log_p0 = -lambda_
-        log_p1 = torch.log(-torch.expm1(-lambda_) + self.eps)
+        log_p0 = -lambda_                                          # log P(y=0)
+        log_p1 = torch.log(-torch.expm1(-lambda_) + self.eps)     # log P(y=1)
 
         if self.positive_only:
+            # Only penalise missed positives; no balancing needed/possible.
             loss = -(target * log_p1)
-        else:
-            loss = -(target * log_p1 + (1.0 - target) * log_p0)
+            return loss.mean()
+
+        # Full Bernoulli NLL
+        loss = -(target * log_p1 + (1.0 - target) * log_p0)
+
+        if self.balance_pos:
+            n_pos = target.sum()
+            n_neg = target.numel() - n_pos
+
+            # Each positive sample is up-weighted so the total weight of the
+            # positive class equals the total weight of the negative class.
+            pos_weight = (n_neg / (n_pos + self.eps)).to(
+                device=log_lambda.device, dtype=log_lambda.dtype
+            )
+
+            # Build a per-element weight map: pos_weight for positives, 1 for negatives.
+            weight = target * pos_weight + (1.0 - target)
+
+            # Normalise by the sum of weights rather than the number of elements
+            # so the loss scale is stable across different class ratios.
+            return (loss * weight).sum() / weight.sum()
 
         return loss.mean()
 
@@ -237,6 +408,7 @@ class IntegratedLoss(nn.Module):
         bias_weight: float = 0.0,
         clamp_source1: tuple[float, float] | None = None,
         clamp_source2: tuple[float, float] | None = None,
+        concat_sources: bool = False, # if True uses only source1_loss
     ):
         super().__init__()
 
@@ -250,6 +422,8 @@ class IntegratedLoss(nn.Module):
 
         self.clamp_source1 = clamp_source1
         self.clamp_source2 = clamp_source2
+
+        self.concat_sources = concat_sources
 
     def forward(
         self,
@@ -266,6 +440,18 @@ class IntegratedLoss(nn.Module):
 
         if self.clamp_source2 is not None:
             pred_source2 = pred_source2.clamp(*self.clamp_source2)
+
+        if self.concat_sources:
+            pred_concat = torch.cat([pred_source1, pred_source2], dim=0)
+            target_concat = torch.cat([target_source1, target_source2], dim=0)
+
+            loss = self.source1_loss(pred_concat, target_concat)
+            logs = {
+            "loss/source1": loss.detach(),
+            "loss/source2": loss.detach(),
+            "loss/total": loss.detach(),
+        }
+            return loss, logs
 
         loss_source1 = self.source1_loss(pred_source1, target_source1)
         loss_source2 = self.source2_loss(pred_source2, target_source2)

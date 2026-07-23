@@ -9,13 +9,9 @@ from typing import Optional
 
 import numpy as np
 import pandas as pd
-import geopandas as gpd
-from functools import lru_cache
-from shapely.ops import unary_union
-from shapely.geometry import Point
 
-
-
+# parquet
+import pyarrow.parquet as pq
 
 
 NON_COVARIATE_COLS = {
@@ -34,12 +30,18 @@ NON_COVARIATE_COLS = {
 
 DEFAULT_METADATA_COLS = ["lon", "lat", "areaInM2"]
 
+ALPHAEARTH_COVARIATES = ['A00', 'A01', 'A02', 'A03', 'A04', 'A05',
+       'A06', 'A07', 'A08', 'A09', 'A10', 'A11', 'A12', 'A13', 'A14', 'A15',
+       'A16', 'A17', 'A18', 'A19', 'A20', 'A21', 'A22', 'A23', 'A24', 'A25',
+       'A26', 'A27', 'A28', 'A29', 'A30', 'A31', 'A32', 'A33', 'A34', 'A35',
+       'A36', 'A37', 'A38', 'A39', 'A40', 'A41', 'A42', 'A43', 'A44', 'A45',
+       'A46', 'A47', 'A48', 'A49', 'A50', 'A51', 'A52', 'A53', 'A54', 'A55',
+       'A56', 'A57', 'A58', 'A59', 'A60', 'A61', 'A62', 'A63']
+
 
 # -------------------------
 # basic helpers
 # -------------------------
-
-
 
 def coerce_int_col(df: pd.DataFrame, col: str) -> pd.DataFrame:
     df = df.copy()
@@ -65,62 +67,17 @@ def normalize_lon_lat(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-
-@lru_cache(maxsize=1)
-def _load_france_polygon(exclude_corsica: bool = True):
-    """
-    Load the metropolitan-France boundary as a single (multi)polygon.
-    Cached so the shapefile is only read once per process.
-    """
-
-    url = "https://naturalearth.s3.amazonaws.com/10m_cultural/ne_10m_admin_0_countries.zip"
-    world = gpd.read_file(url)
-    france = world[world["ADMIN"] == "France"]
-
-    if france.empty:
-        raise RuntimeError("Could not find 'France' in the admin boundaries file.")
-
-    # Natural Earth bundles overseas departments (French Guiana, Guadeloupe, ...)
-    # into the same multipolygon. Keep only the parts that fall in mainland
-    # Europe, using each sub-polygon's bounding box (not just its centroid,
-    # which can be misleading for elongated/irregular shapes).
-    geom = france.geometry.iloc[0]
-    parts = [g for g in geom.geoms] if geom.geom_type == "MultiPolygon" else [geom]
-
-    # Corsica sits roughly within lon [8.5, 9.6], lat [41.3, 43.1]
-    CORSICA_BBOX = (8.4, 41.2, 9.7, 43.2)  # (minx, miny, maxx, maxy)
-
-    def is_corsica(part) -> bool:
-        minx, miny, maxx, maxy = part.bounds
-        cminx, cminy, cmaxx, cmaxy = CORSICA_BBOX
-        return (minx >= cminx and miny >= cminy and maxx <= cmaxx and maxy <= cmaxy)
-
-    mainland_parts = [
-        g for g in parts
-        if -6.0 <= g.centroid.x <= 10.0 and 41.0 <= g.centroid.y <= 52.0
-        and not (exclude_corsica and is_corsica(g))
-    ]
-
-    # save plot
-    import matplotlib.pyplot as plt
-    fig, ax = plt.subplots(figsize=(8, 8))
-    gpd.GeoSeries(mainland_parts).plot(ax=ax, color="lightblue", edgecolor="black")
-    ax.set_title("Metropolitan France Boundary" + (" (excl. Corsica)" if exclude_corsica else " (Mainland + Corsica)"))
-    plt.savefig("france_boundary.png", dpi=300)
-    plt.close()
-
-    print("Saved metropolitan France boundary plot to 'france_boundary.png'.")
-
-    return unary_union(mainland_parts)
-
 def filter_region(df: pd.DataFrame, region: str) -> pd.DataFrame:
     """
     Region filtering happens before species vocab creation.
 
     For France:
     - if country/region column exists, use it
-    - otherwise filter by point-in-polygon against the actual France boundary
-      (mainland + Corsica, overseas departments excluded)
+    - otherwise use a rough metropolitan-France lon/lat bounding box
+
+    NOTE:
+    This bounding box excludes overseas France.
+    Use polygon filtering later if overseas territories matter.
     """
     region = region.lower()
 
@@ -137,20 +94,13 @@ def filter_region(df: pd.DataFrame, region: str) -> pd.DataFrame:
         #         return df[mask].copy()
 
         if {"lon", "lat"}.issubset(df.columns):
-
             lon = pd.to_numeric(df["lon"], errors="coerce")
             lat = pd.to_numeric(df["lat"], errors="coerce")
-            valid = lon.notna() & lat.notna()
 
-            france_poly = _load_france_polygon()
-            points = gpd.GeoSeries(
-                [Point(x, y) for x, y in zip(lon[valid], lat[valid])],
-                crs="EPSG:4326",
+            mask = (
+                lon.between(-5.5, 10.0)
+                & lat.between(41.0, 52.0)
             )
-            inside = points.within(france_poly)
-
-            mask = pd.Series(False, index=df.index)
-            mask[valid] = inside.to_numpy()
             return df[mask].copy()
 
         raise ValueError(
@@ -158,48 +108,6 @@ def filter_region(df: pd.DataFrame, region: str) -> pd.DataFrame:
         )
 
     raise ValueError(f"Unknown region: {region}")
-
-# def filter_region(df: pd.DataFrame, region: str) -> pd.DataFrame:
-#     """
-#     Region filtering happens before species vocab creation.
-
-#     For France:
-#     - if country/region column exists, use it
-#     - otherwise use a rough metropolitan-France lon/lat bounding box
-
-#     NOTE:
-#     This bounding box excludes overseas France.
-#     Use polygon filtering later if overseas territories matter.
-#     """
-#     region = region.lower()
-
-#     if region in {"full", "all", "global", "none"}:
-#         return df.copy()
-
-#     df = normalize_lon_lat(df)
-
-#     if region == "france":
-#         # for col in ["country", "region"]:
-#         #     if col in df.columns:
-#         #         vals = df[col].astype(str).str.lower()
-#         #         mask = vals.isin({"france", "fr", "fra", "metropolitan france"})
-#         #         return df[mask].copy()
-
-#         if {"lon", "lat"}.issubset(df.columns):
-#             lon = pd.to_numeric(df["lon"], errors="coerce")
-#             lat = pd.to_numeric(df["lat"], errors="coerce")
-
-#             mask = (
-#                 lon.between(-5.5, 10.0)
-#                 & lat.between(41.0, 52.0)
-#             )
-#             return df[mask].copy()
-
-#         raise ValueError(
-#             "Cannot filter region='france'. Need country/region column or lon/lat columns."
-#         )
-
-#     raise ValueError(f"Unknown region: {region}")
 
 
 def extract_unique_species_from_column(series: pd.Series) -> np.ndarray:
@@ -375,6 +283,7 @@ def infer_covariates(df: pd.DataFrame, metadata_cols: list[str]) -> list[str]:
         and pd.api.types.is_numeric_dtype(df[c])
     ]
 
+
     return covariates
 
 
@@ -443,7 +352,7 @@ def preprocess_geoplant(
 
     po_path = raw_root / "PresenceOnlyOccurrences"
     pa_path = raw_root / "PresenceAbsenceSurveys"
-    values_path = raw_root / "values"
+    values_path = raw_root / "AlphaEarth"
 
     processed_root = output_root / region
     species_dir = processed_root / "species"
@@ -464,6 +373,7 @@ def preprocess_geoplant(
     pa_train_df = pd.read_csv(pa_path / "PA_metadata_train.csv")
     pa_test_df = pd.read_csv(pa_path / "test_labels.csv")
     pa_test_metadata = pd.read_csv(pa_path / "PA_metadata_test.csv")
+
 
     po_df = normalize_lon_lat(po_df)
     pa_train_df = normalize_lon_lat(pa_train_df)
@@ -585,30 +495,75 @@ def preprocess_geoplant(
     # -------------------------
     # load bioclimatic covariates
     # -------------------------
-    pa_test_bioclim = coerce_int_col(
-        pd.read_csv(values_path / "PA-test-bioclimatic-average.csv"),
-        "surveyId",
-    )
-    pa_train_bioclim = coerce_int_col(
-        pd.read_csv(values_path / "PA-train-bioclimatic-average.csv"),
-        "surveyId",
-    )
-    po_train_bioclim = coerce_int_col(
-        pd.read_csv(values_path / "PO-train-bioclimatic-average.csv"),
-        "surveyId",
-    )
+    # pa_test_bioclim = coerce_int_col(
+    #     pd.read_csv(values_path / "PA-test-bioclimatic-average.csv"),
+    #     "surveyId",
+    # )
+    # pa_train_bioclim = coerce_int_col(
+    #     pd.read_csv(values_path / "PA-train-bioclimatic-average.csv"),
+    #     "surveyId",
+    # )
+    # read data/raw/GeoPlant/AlphaEarth/PA-train-alphaearth.parquet
+    pa_train_alphaearth = pd.read_parquet(values_path / "PA-train-alphaearth.parquet", engine="pyarrow")
+    print('PA Dataset')
+    print(pa_train_alphaearth.head())
+    print(pa_train_alphaearth.columns)
+
+ # pass surveyId to int64
+    pa_train_alphaearth = coerce_int_col(pa_train_alphaearth, "surveyId")
+    # keep only surveyId and covariate columns
+    pa_train_alphaearth = pa_train_alphaearth[["surveyId"] + ALPHAEARTH_COVARIATES].copy()
+
+    
+    
+    # po_train_alphaearth = pd.read_parquet(values_path / "PO-train-alphaearth.parquet", engine="pyarrow")
+    po_train_alphaearth = pd.read_csv('data/raw/GeoPlant/AlphaEarth/PO_metadata_train_alphaearth.csv')
+    # rename alphaearth_0XX to AXX
+    po_train_alphaearth = po_train_alphaearth.rename(columns={f'alphaearth_{i:03d}': f'A{i-1:02d}' for i in range(1,64+1)})
+
+    print('PO Dataset')
+    print(po_train_alphaearth.head())
+    print(po_train_alphaearth.columns)
+
+    # change ae_id of PO to surveyId to merge with po_species_tbl (TODO`: check if this is correct)
+    po_train_alphaearth = coerce_int_col(po_train_alphaearth, "surveyId")
+    po_train_alphaearth = po_train_alphaearth[["surveyId"] + ALPHAEARTH_COVARIATES].copy()
+
+
+    # for now test would be just a copy with empty cols
+    # pa_test_alphaearth = pd.DataFrame(columns=pa_train_alphaearth.columns, dtype=None)
+    # pa_test_alphaearth = pa_test_alphaearth.astype(pa_train_alphaearth.dtypes.to_dict())
+    # pa_test_alphaearth = pa_test_alphaearth[["surveyId"] + ALPHAEARTH_COVARIATES].copy()
+
+    pa_test_alphaearth = pd.read_parquet(values_path / "PA-test-iid-alphaearth.parquet", engine="pyarrow")
+    pa_test_alphaearth = coerce_int_col(pa_test_alphaearth, "surveyId")
+    # keep only surveyId and covariate columns
+    pa_test_alphaearth = pa_test_alphaearth[["surveyId"] + ALPHAEARTH_COVARIATES].copy()
+
+
+
+
+    # po_train_bioclim = coerce_int_col(
+    #     pd.read_csv(values_path / "PO-train-bioclimatic-average.csv"),
+    #     "surveyId",
+    # )
+    # load parquet
+
 
     # -------------------------
     # merge labels/metadata with covariates
     # -------------------------
-    po_merged = po_species_tbl.merge(po_train_bioclim, on="surveyId", how="inner")
-    pa_train_merged = pa_train_species_tbl.merge(pa_train_bioclim, on="surveyId", how="inner")
-    pa_test_merged = pa_test_species_tbl.merge(pa_test_bioclim, on="surveyId", how="inner")
+    po_merged = po_species_tbl.merge(po_train_alphaearth, on="surveyId", how="inner")
+    pa_train_merged = pa_train_species_tbl.merge(pa_train_alphaearth, on="surveyId", how="inner")
+    pa_test_merged = pa_test_species_tbl.merge(pa_test_alphaearth, on="surveyId", how="inner")
 
     print("Merged shapes:")
     print("  PO       :", po_merged.shape)
     print("  PA train :", pa_train_merged.shape)
     print("  PA test  :", pa_test_merged.shape)
+
+
+
 
     # -------------------------
     # infer covariates robustly
@@ -616,6 +571,7 @@ def preprocess_geoplant(
     covariates_po = set(infer_covariates(po_merged, metadata_cols))
     covariates_pa_train = set(infer_covariates(pa_train_merged, metadata_cols))
     covariates_pa_test = set(infer_covariates(pa_test_merged, metadata_cols))
+
 
     covariates = sorted(
         covariates_po
@@ -643,6 +599,7 @@ def preprocess_geoplant(
             covariates,
         )
     )
+    # print pa_train_merged columns
     split_stats.update(
         save_species_and_covariates(
             pa_train_merged,
@@ -703,7 +660,7 @@ def parse_args():
     parser.add_argument(
         "--output-root",
         type=str,
-        default="data/processed/GeoPlant",
+        default="data/processed/GeoPlant_AE",
     )
     parser.add_argument(
         "--region",

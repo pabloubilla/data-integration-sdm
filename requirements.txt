@@ -1,0 +1,14 @@
+cvxpy==1.7.5
+geopandas==1.0.1
+joblib==1.5.2
+k_means_constrained==0.7.3
+matplotlib==3.9.4
+numpy==1.24.2
+pandas==2.3.3
+PyYAML==6.0.3
+rasterio==1.4.3
+scikit_learn==1.6.1
+scipy==1.13.1
+tabpfn==6.0.6
+torch==2.8.0
+tqdm==4.67.1

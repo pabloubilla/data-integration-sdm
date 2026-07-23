@@ -2,7 +2,7 @@
 # PA-only RISDM with BIO1..BIO19 over mainland France
 # ============================================================
 
-setwd("~/Documents/EcoControl/data-integration-sdm")
+setwd("~/Documents/PhD/data-integration-sdm")
 
 suppressPackageStartupMessages({
   library(dplyr)
@@ -19,13 +19,13 @@ suppressPackageStartupMessages({
 # paths / settings
 # -----------------------------
 data_folder      <- "full_data"
-species_path     <- "data/processed/GeoPlant/full_data"
-covariates_path  <- "data/processed/GeoPlant/climatic"
+species_path     <- "data/processed/GeoPlant/france/species"
+covariates_path  <- "data/processed/GeoPlant/france/covariates"
 bioclim_dir      <- "data/raw/GeoPlant/Rasters/BioClimatic_Average_1981-2010"
 output_root      <- file.path("output", paste0("integration_geoplant_", data_folder))
 dir.create(output_root, recursive = TRUE, showWarnings = FALSE)
 
-sp <- 4340 # 88
+sp <- 230 #4340 # 88
 
 # -----------------------------
 # data loader
@@ -89,6 +89,7 @@ Y_pa_te <- dat$Y_pa_te
 
 Y_pa_tr
 
+hist(Y_pa_te$presence)
 
 # -----------------------------
 # 1) France mainland polygon

@@ -59,11 +59,11 @@ def _plot_row(
                     [np.median(d), np.median(d)], color="white", lw=1.8, zorder=5)
             ax.scatter(x, mean, marker="D", s=28, facecolors="white",
                        edgecolors="#222", linewidths=0.8, zorder=6)
-            if i == winner_idx:
-                top = np.max(d)
-                ax.text(x, top + 0.02, "★", ha="center", va="bottom", fontsize=9,
-                        color="#FFD700", zorder=7,
-                        path_effects=[pe.withStroke(linewidth=1.5, foreground="#888")])
+            # if i == winner_idx:
+            #     top = np.max(d)
+            #     ax.text(x, top + 0.02, "★", ha="center", va="bottom", fontsize=9,
+            #             color="#FFD700", zorder=7,
+            #             path_effects=[pe.withStroke(linewidth=1.5, foreground="#888")])
 
         ax.set_title(OPTIONS_MAP[option], fontsize=11, fontweight="bold", pad=4)
         ax.set_xlim(positions[0] - box_width, positions[-1] + box_width)
@@ -111,7 +111,7 @@ def plot_auc_boxplots(
     labels = [run_name_map.get(r, r) if run_name_map else r for r in runs]
     run_colors = _make_run_colors(runs)
 
-    fig, axes = plt.subplots(1, 3, figsize=(9, 4), sharey=True)
+    fig, axes = plt.subplots(1, 3, figsize=(7, 4), sharey=True)
     _plot_row(axes, df, runs, labels, run_colors, box_width, group_spacing)
     _add_legend(fig, runs, labels, run_colors)
 

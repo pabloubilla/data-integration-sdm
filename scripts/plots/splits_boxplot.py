@@ -124,11 +124,11 @@ def _plot_group(ax, data_by_run, runs, run_colors, positions, box_width):
                     [np.median(d), np.median(d)], color="white", lw=1.8, zorder=5)
         ax.scatter(x, mean, marker="D", s=28, facecolors="white",
                    edgecolors="#222", linewidths=0.8, zorder=6)
-        if i == winner_idx:
-            top = np.max(d) if len(d) else mean
-            ax.text(x, top + 0.02, "★", ha="center", va="bottom", fontsize=9,
-                    color="#FFD700", zorder=7,
-                    path_effects=[pe.withStroke(linewidth=1.5, foreground="#888")])
+        # if i == winner_idx:
+        #     top = np.max(d) if len(d) else mean
+        #     ax.text(x, top + 0.02, "★", ha="center", va="bottom", fontsize=9,
+        #             color="#FFD700", zorder=7,
+        #             path_effects=[pe.withStroke(linewidth=1.5, foreground="#888")])
 
     return winner_idx
 
@@ -148,8 +148,9 @@ def _add_category_labels(ax, cluster_centers, show_labels):
     for cat in CATEGORY_ORDER:
         if cat in cluster_centers:
             cmap = plt.get_cmap(CATEGORY_CMAPS.get(cat, "Greys"))
-            ax.text(cluster_centers[cat], -0.06, cat, transform=trans,
-                    ha="center", va="top", fontsize=7.5, style="italic",
+            ax.text(cluster_centers[cat], -0.02, cat, transform=trans,
+                    ha="center", va="top", fontsize=7.5, 
+                    # style="italic",
                     fontweight="medium", color=cmap(0.85))
 
 
@@ -166,7 +167,7 @@ def _draw_custom_legend(fig, legend_ax_rect, runs_by_cat, run_colors):
     columns = [(cat, runs_by_cat[cat]) for cat in present_cats] + [("Mean", [("mean", "Mean")])]
 
     # --- tune these to reshape the legend ---
-    gap = 0.001           # horizontal gap between columns
+    gap = 0.1           # horizontal gap between columns
     avail_width = 0.6     # total width spent on columns (increase to spread out)
     header_frac = 0.1     # vertical space for the bold category header
     swatch_w, swatch_h_frac = 0.028, 0.4   # swatch size (height as fraction of a row)
@@ -188,7 +189,7 @@ def _draw_custom_legend(fig, legend_ax_rect, runs_by_cat, run_colors):
     for (cat, entries), width in zip(columns, col_widths):
         is_mean_col = cat == "Mean"
         header_color = "#333" if is_mean_col else plt.get_cmap(CATEGORY_CMAPS.get(cat, "Greys"))(0.85)
-        lax.text(x + 0.02, 1 - header_frac / 2, cat, ha="left", va="center",
+        lax.text(x + 0.02, 1 - header_frac / 2, cat if not is_mean_col else "", ha="left", va="center",
                   fontsize=9, fontweight="bold", color=header_color)
 
         for k, (run, lbl) in enumerate(entries):
@@ -297,6 +298,11 @@ def plot_auc_boxplots(
     )
     out = os.path.join(path, f"{metric}_boxplots.png")
     plt.savefig(out, dpi=350, bbox_inches="tight")
+
+
+    out_svg = os.path.join(path, f"{metric}_boxplots.svg")
+    # for SVG transparent background
+    plt.savefig(out_svg, bbox_inches="tight", facecolor="none")
     print(f"Saved → {out}")
     plt.show()
 

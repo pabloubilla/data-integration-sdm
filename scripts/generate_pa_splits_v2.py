@@ -27,6 +27,7 @@ def plot_splits_overview(
     specs,
     covs_plot: list[str],
     output_dir: Path,
+    nrows: int = 3,
 ):
     """
     One panel per anchor row, one column per option (closest/middle/farthest).
@@ -37,8 +38,8 @@ def plot_splits_overview(
     X_mat = X_pa[covs_plot].to_numpy()
     all_idx = np.arange(len(X_pa))
  
-    x_lim = (-5, 11)
-    y_lim = (39, 52)
+    x_lim = (-5, 8.5)
+    y_lim = (42, 51.5)
     proj = ccrs.PlateCarree()
  
     anchor_groups: dict[int, dict[str, SplitSpec]] = {}
@@ -46,18 +47,26 @@ def plot_splits_overview(
         anchor_groups.setdefault(spec.test_number, {})[spec.option] = spec
  
     options_order = ("closest", "middle", "farthest")
-    option_colors = {"closest": "#1E88E5", "middle": "#FFA007", "farthest": "#24e18c"}
+    color_map = {
+            "test": "#E7651F",
+            "closest": "#1E88E5",
+            "middle": "#1E88E5", 
+            "farthest": "#1E88E5"
+            }
     cx, cy = 0, 1
  
-    nrows = len(anchor_groups)
+    if nrows == -1:
+        nrows = len(anchor_groups) # use -1 to plot all anchors, else limit to nrows
     ncols = len(options_order)
     fig, axes = plt.subplots(
         nrows, ncols, figsize=(5 * ncols, 4 * nrows),
         subplot_kw={"projection": proj},
     )
     axes = np.atleast_2d(axes)
+
+    anchor_items = sorted(anchor_groups.items())[:nrows]
  
-    for row, (anchor_ix, option_specs) in enumerate(sorted(anchor_groups.items())):
+    for row, (anchor_ix, option_specs) in enumerate(anchor_items):
         any_spec = next(iter(option_specs.values()))
         test_idx = any_spec.test_idx
  
@@ -89,10 +98,10 @@ def plot_splits_overview(
                            c="#bbbbbb", s=5, zorder=1, linewidths=0, transform=proj)
             if len(train_idx) > 0:
                 ax.scatter(X_mat[train_idx, cx], X_mat[train_idx, cy],
-                           c=option_colors[option], s=10, zorder=2, linewidths=0, transform=proj)
+                           c=color_map[option], s=10, zorder=2, linewidths=0, transform=proj)
             if len(test_idx) > 0:
                 ax.scatter(X_mat[test_idx, cx], X_mat[test_idx, cy],
-                           c="#D81B60", s=10, zorder=3, linewidths=0, transform=proj)
+                           c=color_map["test"], s=10, zorder=3, linewidths=0, transform=proj)
  
             title = (
                 f"anchor {anchor_ix} | {option}\n"
@@ -116,17 +125,17 @@ def plot_splits_overview(
  
 
 
-    legend_handles = [
-        mpatches.Patch(color="#e74c3c", label="test"),
-        mpatches.Patch(color=option_colors["closest"], label="train closest"),
-        mpatches.Patch(color=option_colors["middle"], label="train middle"),
-        mpatches.Patch(color=option_colors["farthest"], label="train farthest"),
-        mpatches.Patch(color="#bbbbbb", label="unused"),
-        Line2D([0], [0], marker="X", color="w", markerfacecolor="black",
-            markeredgecolor="black", markersize=10, linestyle="none",
-            label="anchor"),
-    ]
-    fig.legend(handles=legend_handles, loc="lower center", ncol=5, fontsize=8, frameon=False)
+    # legend_handles = [
+    #     mpatches.Patch(color="#e74c3c", label="test"),
+    #     mpatches.Patch(color=color_map["closest"], label="train closest"),
+    #     mpatches.Patch(color=color_map["middle"], label="train middle"),
+    #     mpatches.Patch(color=color_map["farthest"], label="train farthest"),
+    #     mpatches.Patch(color="#bbbbbb", label="unused"),
+    #     Line2D([0], [0], marker="X", color="w", markerfacecolor="black",
+    #         markeredgecolor="black", markersize=10, linestyle="none",
+    #         label="anchor"),
+    # ]
+    # fig.legend(handles=legend_handles, loc="lower center", ncol=5, fontsize=8, frameon=False)
     plt.tight_layout(rect=[0, 0.04, 1, 1])
  
     out_path = output_dir / "splits_overview.png"

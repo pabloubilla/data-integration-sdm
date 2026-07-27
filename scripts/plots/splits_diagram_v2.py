@@ -20,11 +20,11 @@ ANCHOR_FY   = 0.30
 
 # colors
 COL_PA      = "#7F77DD"   
-COL_TEST    = "#E24B4A"  
-COL_CLOSE   = "#1D9E75"   
-COL_MID     = "#1D9E75"   
-COL_FAR     = "#1D9E75"   
-COL_TRAIN   = "#1D9E75"   
+COL_TEST    = "#BC1DB2"  
+COL_CLOSE   = "#157BAE"   
+COL_MID     = "#157BAE"   
+COL_FAR     = "#157BAE"   
+COL_TRAIN   = "#157BAE"   
 COL_PO      = "#E68B24"   
 
 # point sizes

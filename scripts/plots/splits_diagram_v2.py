@@ -5,7 +5,7 @@ from pathlib import Path
 # ── parameters ───────────────────────────────────────────────────────────────
 GRID_BINS   = 14        # bins per axis — controls grid coarseness
 OCCUPANCY   = 0.80      # fraction of cells that have PA points
-N_PO        = 1000       # number of PO points
+N_PO        = 1000      # number of PO points
 W           = 480       # canvas size (square)
 MARGIN      = 28
 INNER       = W - 2 * MARGIN
@@ -18,14 +18,27 @@ SEED        = 7
 ANCHOR_FX   = 0.68
 ANCHOR_FY   = 0.30
 
-# colors
-COL_PA      = "#7F77DD"   
-COL_TEST    = "#BC1DB2"  
-COL_CLOSE   = "#157BAE"   
-COL_MID     = "#157BAE"   
-COL_FAR     = "#157BAE"   
-COL_TRAIN   = "#157BAE"   
-COL_PO      = "#E68B24"   
+# ── colors ────────────────────────────────────────────────────────────────────
+# TEST and TRAIN are matched in lightness on purpose (same "weight" on the page),
+# so the hatch pattern on TEST — not color contrast — is what makes it CVD-safe.
+COL_PA      = "#7F77DD"
+COL_TEST    = "#C8447A"   # rose
+COL_CLOSE   = "#3E9FB8"   # teal
+COL_MID     = "#3E9FB8"
+COL_FAR     = "#3E9FB8"
+COL_TRAIN   = "#3E9FB8"
+COL_PO      = "#E68B24"
+
+CANVAS_BG     = "none"     # keep transparent so it drops onto any slide/page bg
+CANVAS_STROKE = "#000000"
+
+# hatch pattern used for every "test" square, regardless of panel
+HATCH_ID       = "hatchTest"
+HATCH_TILE     = 5       # px — small tile so 2-3 stripes still fit inside a square
+HATCH_STROKE   = "#FFFFFF"
+HATCH_OPACITY  = 0.9
+HATCH_WIDTH    = 2.2      # line thickness — the main lever for "more evident"
+HATCH_CROSS    = True     # True = crosshatch (grid), False = single diagonal stripes
 
 # point sizes
 SQ          = None        # square half-size — set automatically below
@@ -37,7 +50,7 @@ OUT_DIR.mkdir(parents=True, exist_ok=True)
 # ── grid + PA points ─────────────────────────────────────────────────────────
 rng  = np.random.default_rng(SEED)
 CELL = INNER / GRID_BINS
-SQ   = CELL * 0.38       # square fills ~75% of cell width
+SQ   = CELL * 0.40       # square fills ~80% of cell width
 
 cell_centers = []
 for i in range(GRID_BINS):
@@ -93,7 +106,7 @@ sorted_dens   = train_density[train_order]
 
 target_tercile = int(round(len(train_idx) / 3))
 
-def fill_tercile(remaining_ids, remaining_dens, target, rng, invert=False):
+def fill_tercile(remaining_ids, remaining_dens, target, rng, invert=False, choose_max=True):
     """Iteratively sample by density weight until target count reached."""
     rem_ids  = list(remaining_ids)
     rem_dens = list(remaining_dens)
@@ -104,7 +117,10 @@ def fill_tercile(remaining_ids, remaining_dens, target, rng, invert=False):
         if invert:
             w = 1.0 / (w + 1e-9)
         w = w / w.sum()
-        pick   = int(rng.choice(len(rem_ids), p=w))
+        if choose_max:
+            pick = int(np.argmax(w))
+        else:
+            pick = int(rng.choice(len(rem_ids), p=w))
         selected.append(rem_ids[pick])
         count += 1
         rem_ids.pop(pick)
@@ -130,7 +146,7 @@ cluster_centers = [
     (0.50, 0.80),   # bottom-center
     (0.70, 0.60),   # center-right
     (0.20, 0.30),   # top-left
-    (0.80, 0.10),    # top-right
+    (0.80, 0.10),   # top-right
 ]
 cluster_std   = 0.10   # spread of each cluster, as fraction of INNER
 cluster_sizes = [60, 50, 45, 60, 25, 20]   # points per cluster (sums to N_PO)
@@ -159,31 +175,54 @@ def svg_root(title_text, desc_text, vw=W, vh=W):
     ET.SubElement(el, "desc").text  = desc_text
     return el
 
-def sq(parent, cx, cy, size, fill, opacity=0.88, rx=1.5):
+def add_canvas(svg, fill=CANVAS_BG, stroke=CANVAS_STROKE):
+    """Soft background + border so the panel reads as a card, not a void."""
+    ET.SubElement(svg, "rect", {
+        "x": "0", "y": "0",
+        "width": str(W), "height": str(W),
+        "fill": fill, "stroke": stroke, "stroke-width": "1.5",
+        "rx": "12",
+    })
+
+def add_hatch_pattern(svg):
+    """Diagonal white hatch over COL_TEST — the CVD-safe cue that doesn't
+    depend on the viewer being able to tell rose from teal."""
+    defs = ET.SubElement(svg, "defs")
+    pattern = ET.SubElement(defs, "pattern", {
+        "id": HATCH_ID,
+        "width": str(HATCH_TILE), "height": str(HATCH_TILE),
+        "patternUnits": "userSpaceOnUse",
+        "patternTransform": "rotate(45)",
+    })
+    ET.SubElement(pattern, "rect", {
+        "width": str(HATCH_TILE), "height": str(HATCH_TILE), "fill": COL_TEST,
+    })
+    ET.SubElement(pattern, "line", {
+        "x1": "0", "y1": "0", "x2": "0", "y2": str(HATCH_TILE),
+        "stroke": HATCH_STROKE, "stroke-width": str(HATCH_WIDTH), "opacity": str(HATCH_OPACITY),
+    })
+    if HATCH_CROSS:
+        ET.SubElement(pattern, "line", {
+            "x1": "0", "y1": "0", "x2": str(HATCH_TILE), "y2": "0",
+            "stroke": HATCH_STROKE, "stroke-width": str(HATCH_WIDTH), "opacity": str(HATCH_OPACITY),
+        })
+
+def sq(parent, cx, cy, size, fill, opacity=0.9, rx=2):
     ET.SubElement(parent, "rect", {
         "x": str(round(cx - size, 2)), "y": str(round(cy - size, 2)),
         "width": str(round(size * 2, 2)), "height": str(round(size * 2, 2)),
         "fill": fill, "opacity": str(opacity), "rx": str(rx),
     })
 
-def dot(parent, cx, cy, r, fill, opacity=0.75):
+def dot(parent, cx, cy, r, fill, opacity=0.78):
     ET.SubElement(parent, "circle", {
         "cx": str(round(cx, 5)), "cy": str(round(cy, 5)),
         "r":  str(r), "fill": fill, "opacity": str(opacity),
     })
 
-def draw_squares(parent, indices, fill, opacity=0.88):
+def draw_squares(parent, indices, fill, opacity=0.9):
     for i in indices:
         sq(parent, pa[i, 0], pa[i, 1], SQ, fill, opacity)
-
-def add_canvas_anchor(svg, fill="none", stroke="#000000"):
-    ET.SubElement(svg, "rect", {
-        "x": "0", "y": "0",
-        "width": str(W), "height": str(W),
-        "fill": fill, "stroke": stroke,
-        "rx": "12",
-    })
-
 
 def save(svg, name):
     path = OUT_DIR / name
@@ -191,10 +230,9 @@ def save(svg, name):
     print(f"  saved → {path}")
 
 
-
 # ── panel 1: all PA points ────────────────────────────────────────────────────
 svg = svg_root("PA survey grid", "All presence-absence survey locations as a grid")
-add_canvas_anchor(svg)
+add_canvas(svg)
 draw_squares(svg, range(n_pa), COL_PA)
 save(svg, "panel_1_pa_grid.svg")
 
@@ -204,45 +242,49 @@ trad_test  = rng.choice(n_pa, size=int(n_pa * TEST_PROP), replace=False)
 trad_train = np.setdiff1d(np.arange(n_pa), trad_test)
 
 svg = svg_root("Traditional train/test split", "Random 75/25 split with no spatial structure")
-add_canvas_anchor(svg)
+add_canvas(svg)
+add_hatch_pattern(svg)
 draw_squares(svg, trad_train, COL_TRAIN)
-draw_squares(svg, trad_test,  COL_TEST)
+draw_squares(svg, trad_test,  f"url(#{HATCH_ID})")
 save(svg, "panel_2_traditional.svg")
 
 # ── panel 3a: Gaussian split — closest ───────────────────────────────────────
 svg = svg_root("Gaussian split — closest train",
-               "Test blob in red, closest train in teal, others faded")
-add_canvas_anchor(svg)
+               "Test blob hatched, closest train in teal, others faded")
+add_canvas(svg)
+add_hatch_pattern(svg)
 draw_squares(svg, far_idx,   COL_PA,    opacity=0.18)
 draw_squares(svg, mid_idx,   COL_PA,    opacity=0.18)
 draw_squares(svg, close_idx, COL_CLOSE, opacity=0.90)
-draw_squares(svg, test_idx,  COL_TEST,  opacity=0.90)
+draw_squares(svg, test_idx,  f"url(#{HATCH_ID})", opacity=0.90)
 save(svg, "panel_3a_closest.svg")
 
 # ── panel 3b: Gaussian split — middle ────────────────────────────────────────
 svg = svg_root("Gaussian split — middle train",
-               "Test blob in red, middle-distance train in amber, others faded")
-add_canvas_anchor(svg)
+               "Test blob hatched, middle-distance train in teal, others faded")
+add_canvas(svg)
+add_hatch_pattern(svg)
 draw_squares(svg, far_idx,   COL_PA,  opacity=0.18)
 draw_squares(svg, close_idx, COL_PA,  opacity=0.18)
 draw_squares(svg, mid_idx,   COL_MID, opacity=0.90)
-draw_squares(svg, test_idx,  COL_TEST, opacity=0.90)
+draw_squares(svg, test_idx,  f"url(#{HATCH_ID})", opacity=0.90)
 save(svg, "panel_3b_middle.svg")
 
 # ── panel 3c: Gaussian split — farthest ──────────────────────────────────────
 svg = svg_root("Gaussian split — farthest train",
-               "Test blob in red, farthest train in blue, others faded")
-add_canvas_anchor(svg)
+               "Test blob hatched, farthest train in teal, others faded")
+add_canvas(svg)
+add_hatch_pattern(svg)
 draw_squares(svg, close_idx, COL_PA,  opacity=0.18)
 draw_squares(svg, mid_idx,   COL_PA,  opacity=0.18)
 draw_squares(svg, far_idx,   COL_FAR, opacity=0.90)
-draw_squares(svg, test_idx,  COL_TEST, opacity=0.90)
+draw_squares(svg, test_idx,  f"url(#{HATCH_ID})", opacity=0.90)
 save(svg, "panel_3c_farthest.svg")
 
 # ── panel 4: PO points ───────────────────────────────────────────────────────
 svg = svg_root("Presence-only observations",
                "Opportunistically recorded species occurrences as dots")
-add_canvas_anchor(svg)
+add_canvas(svg)
 for x, y in zip(po_x, po_y):
     dot(svg, x, y, DOT_R, COL_PO)
 save(svg, "panel_4_po.svg")
@@ -250,3 +292,4 @@ save(svg, "panel_4_po.svg")
 print("\nDone. Tweak at the top of the script:")
 print("  GRID_BINS, OCCUPANCY, BANDWIDTH, ANCHOR_FX/FY, TEST_PROP")
 print("  SQ (square size), DOT_R, COL_* colors, SEED")
+print("  HATCH_TILE / HATCH_STROKE / HATCH_OPACITY for the test texture")

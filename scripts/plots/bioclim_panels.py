@@ -57,8 +57,22 @@ XLIM    = (-5.2, 8.3)
 YLIM    = (42.0, 51.2)
 TITLE_FS = 7  # subplot title font size
 
+N_ROWS, N_COLS = 2, 3
+
+# Latitude-corrected aspect: 1 deg lon covers less ground than 1 deg lat here.
+MEAN_LAT = np.deg2rad((YLIM[0] + YLIM[1]) / 2)
+ASPECT = 1 / np.cos(MEAN_LAT)
+
+# Required height:width ratio of each plotted map, given the corrected aspect.
+BOX_RATIO = (YLIM[1] - YLIM[0]) / (XLIM[1] - XLIM[0]) * ASPECT
+
+# Pick a figure width, then derive height so grid cells match BOX_RATIO —
+# this is what actually removes the vertical letterbox gap, not hspace alone.
+FIG_WIDTH = 9.5
+FIG_HEIGHT = BOX_RATIO * (N_ROWS / N_COLS) * FIG_WIDTH
+
 # ── Figure ────────────────────────────────────────────────────────────────────
-fig, axes = plt.subplots(2, 3, figsize=(7, 7))
+fig, axes = plt.subplots(N_ROWS, N_COLS, figsize=(FIG_WIDTH, FIG_HEIGHT))
 fig.patch.set_alpha(0)
 
 for ax, var in zip(axes.flat, VARIABLES):
@@ -102,7 +116,10 @@ for ax, var in zip(axes.flat, VARIABLES):
     # Axes limits + light ticks
     ax.set_xlim(*XLIM)
     ax.set_ylim(*YLIM)
-    ax.set_aspect("equal")
+    # Latitude-corrected aspect (computed once above as ASPECT) so the
+    # map isn't stretched wide — 1 deg lon covers less ground distance
+    # than 1 deg lat does, at ~46-47N.
+    ax.set_aspect(ASPECT)
 
     for spine in ax.spines.values():
         spine.set_visible(True)
@@ -117,7 +134,7 @@ for ax, var in zip(axes.flat, VARIABLES):
 
     print(f"✓ bio{var}  {title}")
 
-plt.subplots_adjust(wspace=0.08, hspace=0.01)
+plt.subplots_adjust(wspace=0.02, hspace=0.2)
 
 fig.savefig(OUT / "03_bioclim_panel.svg", format="svg",
             bbox_inches="tight", transparent=True, dpi=300)

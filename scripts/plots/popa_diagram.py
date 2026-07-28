@@ -1,6 +1,8 @@
 """
 PO vs PA multispecies schematic  —  ecology palette, poster-ready
 ==================================================================
+This version saves the PO panel and PA panel as SEPARATE figure files
+(each gets its own .svg and .pdf), instead of one combined two-panel figure.
 
 QUICK EDITS
 -----------
@@ -98,25 +100,26 @@ AREA_COLOR = "#F2EDE4"   # map background — shared by both panels
 CELL_FILL  = "#D6C9B0"   # surveyed cell background
 CELL_EDGE  = "#8C7355"   # cell border
 
-# ── figure ────────────────────────────────────────────────────
-fig, (ax_po, ax_pa) = plt.subplots(
-    1, 2, figsize=(12, 5.5), facecolor="none",
-    gridspec_kw={"wspace": 0.06},
-)
-
 # fixed 2×2 anchor positions for species markers inside each cell
 ANCHORS = [(0.27, 0.73), (0.73, 0.73), (0.27, 0.27), (0.73, 0.27)]
 
-for ax in (ax_po, ax_pa):
+def _style_axis(ax):
     ax.set_xlim(0, 10); ax.set_ylim(0, 10)
     ax.set_aspect("equal")
-    ax.set_facecolor(AREA_COLOR)
+    ax.set_facecolor("none")   # transparent panel background
     for spine in ax.spines.values():
-        spine.set_linewidth(0.8)
-        spine.set_color("#A8957A")
+        spine.set_linewidth(1.3)
+        spine.set_color("#42392D")
     ax.set_xticks([]); ax.set_yticks([])
 
-# PO panel
+# ── output dir ──────────────────────────────────────────────
+fig_path = os.path.join("outputs", "figures_poster")
+os.makedirs(fig_path, exist_ok=True)
+
+# ── PO figure (standalone) ───────────────────────────────────
+fig_po, ax_po = plt.subplots(figsize=(6, 5.5), facecolor="none")
+_style_axis(ax_po)
+
 for s in SPECIES:
     pts = PO_POINTS.get(s["name"], [])
     if not pts:
@@ -126,7 +129,14 @@ for s in SPECIES:
                   facecolors=s["color"], edgecolors="black",
                   linewidths=PO_LW, zorder=4)
 
-# PA panel
+fig_po.savefig(os.path.join(fig_path, "po_schematic.svg"), bbox_inches="tight", facecolor="none", transparent=True)
+fig_po.savefig(os.path.join(fig_path, "po_schematic.pdf"), bbox_inches="tight", facecolor="none", transparent=True)
+plt.close(fig_po)
+
+# ── PA figure (standalone) ───────────────────────────────────
+fig_pa, ax_pa = plt.subplots(figsize=(6, 5.5), facecolor="none")
+_style_axis(ax_pa)
+
 for (x0, y0), present in CELL_POSITIONS.items():
     ax_pa.add_patch(mpatches.FancyBboxPatch(
         (x0, y0), CELL, CELL, boxstyle="square,pad=0",
@@ -142,9 +152,8 @@ for (x0, y0), present in CELL_POSITIONS.items():
             ax_pa.scatter(ax_x, ax_y, s=(PA_MS*0.65)**2, marker="x",
                           color="#9C8870", linewidths=0.7, zorder=2)
 
-# ── save ──────────────────────────────────────────────────────
-fig_path = os.path.join("outputs", "figures_poster")
-os.makedirs(fig_path, exist_ok=True)
-plt.savefig(os.path.join(fig_path, "po_pa_schematic.svg"), bbox_inches="tight", facecolor="none")
-plt.savefig(os.path.join(fig_path, "po_pa_schematic.pdf"), bbox_inches="tight", facecolor="none")
-print("Saved SVG and PDF.")
+fig_pa.savefig(os.path.join(fig_path, "pa_schematic.svg"), bbox_inches="tight", facecolor="none", transparent=True)
+fig_pa.savefig(os.path.join(fig_path, "pa_schematic.pdf"), bbox_inches="tight", facecolor="none", transparent=True)
+plt.close(fig_pa)
+
+print("Saved po_schematic.svg/.pdf and pa_schematic.svg/.pdf separately.")

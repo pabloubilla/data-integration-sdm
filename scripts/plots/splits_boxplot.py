@@ -10,11 +10,26 @@ import matplotlib.patheffects as pe
 
 CATEGORY_ORDER = ["PO only", "PA only", "PO + PA"]
 CATEGORY_CMAPS = {
-    "PO only": "Blues",
-    "PA only": "Greens",
-    "PO + PA": "Oranges",
+    "PO only": "Oranges",
+    "PA only": "Purples",
+    "PO + PA": "Greens",
 }
 CATEGORY_SHADE_RANGE = (0.45, 0.85)  # avoid too-light/too-dark ends of the colormap
+
+# --- NEW: texture support -------------------------------------------------
+# One hatch pattern per category (set to "" for a category to keep it plain).
+# matplotlib hatch chars: / \ | - + x o O . *  (repeat chars to increase density, e.g. "///")
+CATEGORY_HATCHES = {
+    "PO only": "",
+    "PA only": "",
+    "PO + PA": "",
+}
+
+# If you'd rather vary texture *within* a category (one hatch per run, cycling
+# through this list) instead of one hatch per whole category, set this True.
+HATCH_BY_RUN_WITHIN_CATEGORY = False
+RUN_HATCH_CYCLE = ["", "///", "xxx", "...", "\\\\\\", "+++", "OO", "---"]
+# ---------------------------------------------------------------------------
 
 
 def _infer_category(run: str) -> str:
@@ -73,6 +88,35 @@ def _assign_category_colors(runs, cat_map):
     return run_colors
 
 
+def _assign_category_hatches(runs, cat_map, run_hatch_map=None):
+    """One hatch pattern per run. Either:
+      - a fixed hatch per category (CATEGORY_HATCHES), or
+      - a cycling hatch per run *within* a category (HATCH_BY_RUN_WITHIN_CATEGORY=True), or
+      - explicit per-run overrides via run_hatch_map={"run_name": "///", ...}
+    run_hatch_map (if given) always wins for the runs it names.
+    """
+    runs_by_cat = {}
+    for run in runs:
+        runs_by_cat.setdefault(cat_map[run], []).append(run)
+
+    run_hatches = {}
+    for cat, cat_runs in runs_by_cat.items():
+        if HATCH_BY_RUN_WITHIN_CATEGORY:
+            for i, run in enumerate(cat_runs):
+                run_hatches[run] = RUN_HATCH_CYCLE[i % len(RUN_HATCH_CYCLE)]
+        else:
+            hatch = CATEGORY_HATCHES.get(cat, "")
+            for run in cat_runs:
+                run_hatches[run] = hatch
+
+    if run_hatch_map:
+        for run, hatch in run_hatch_map.items():
+            if run in run_hatches:
+                run_hatches[run] = hatch
+
+    return run_hatches
+
+
 def _compute_positions(runs, cat_map, box_width, group_spacing, category_gap):
     """Box positions with a normal gap within a cluster and category_gap
     between clusters. Also returns cluster_spans (for background shading)
@@ -100,7 +144,7 @@ def _compute_positions(runs, cat_map, box_width, group_spacing, category_gap):
     return np.array(positions), cluster_spans, cluster_centers
 
 
-def _plot_group(ax, data_by_run, runs, run_colors, positions, box_width):
+def _plot_group(ax, data_by_run, runs, run_colors, run_hatches, positions, box_width):
     """Draw one boxplot group (one subplot) and return the winner index."""
     means = [np.mean(d) if len(d) else np.nan for d in data_by_run]
     winner_idx = int(np.nanargmax(means))
@@ -117,6 +161,12 @@ def _plot_group(ax, data_by_run, runs, run_colors, positions, box_width):
     for patch, run in zip(bp["boxes"], runs):
         patch.set_facecolor(run_colors[run])
         patch.set_alpha(0.78)
+        hatch = run_hatches.get(run, "")
+        if hatch:
+            patch.set_hatch(hatch)
+            # hatch lines take the edgecolor; keep it subtle but visible
+            patch.set_edgecolor("#555")
+            patch.set_linewidth(0.8)
 
     for i, (x, d, mean) in enumerate(zip(positions, data_by_run, means)):
         if len(d):
@@ -149,12 +199,12 @@ def _add_category_labels(ax, cluster_centers, show_labels):
         if cat in cluster_centers:
             cmap = plt.get_cmap(CATEGORY_CMAPS.get(cat, "Greys"))
             ax.text(cluster_centers[cat], -0.02, cat, transform=trans,
-                    ha="center", va="top", fontsize=7.5, 
+                    ha="center", va="top", fontsize=7.5,
                     # style="italic",
                     fontweight="medium", color=cmap(0.85))
 
 
-def _draw_custom_legend(fig, legend_ax_rect, runs_by_cat, run_colors):
+def _draw_custom_legend(fig, legend_ax_rect, runs_by_cat, run_colors, run_hatches):
     """One column per source category (entries stacked vertically), plus
     a final column for the Mean marker, styled as a normal one-row entry
     so its spacing matches the rest."""
@@ -199,9 +249,12 @@ def _draw_custom_legend(fig, legend_ax_rect, runs_by_cat, run_colors):
                 lax.scatter(sw_x + swatch_w / 2, y, marker="D", s=28, facecolors="white",
                             edgecolors="#222", linewidths=0.8, zorder=3)
             else:
+                hatch = run_hatches.get(run, "")
+                rect_kwargs = dict(facecolor=run_colors[run], alpha=0.78, edgecolor="none")
+                if hatch:
+                    rect_kwargs.update(hatch=hatch, edgecolor="#555", linewidth=0.6)
                 lax.add_patch(mpatches.Rectangle(
-                    (sw_x, y - swatch_h / 2), swatch_w, swatch_h,
-                    facecolor=run_colors[run], alpha=0.78, edgecolor="none"))
+                    (sw_x, y - swatch_h / 2), swatch_w, swatch_h, **rect_kwargs))
             lax.text(sw_x + swatch_w + 0.008, y, lbl, ha="left", va="center", fontsize=7.6)
 
         if x > 0:
@@ -215,6 +268,7 @@ def plot_auc_boxplots(
     run_name_map: dict | None = None,
     run_order: list | None = None,
     run_category_map: dict | None = None,   # override auto-detected PO/PA/PO+PA category per run
+    run_hatch_map: dict | None = None,      # NEW: override hatch pattern per run, e.g. {"po_dme": "///"}
     box_width: float = 0.6,                 # width of each box
     group_spacing: float = 0.05,            # gap between boxes within a category cluster
     category_gap: float = 0.5,              # extra gap between category clusters
@@ -226,7 +280,9 @@ def plot_auc_boxplots(
     # spacing) and the "tune these" block inside _draw_custom_legend
     # (legend column widths/spacing). legend_height below controls how
     # much vertical room the legend gets.
-
+    #
+    # Texture knobs: CATEGORY_HATCHES / HATCH_BY_RUN_WITHIN_CATEGORY / RUN_HATCH_CYCLE
+    # at the top of this file, or pass run_hatch_map for one-off overrides.
 
     df = pd.read_csv(os.path.join(path, "summary_common.csv"))
     options = ["closest", "middle", "farthest"]
@@ -246,6 +302,7 @@ def plot_auc_boxplots(
 
     labels = [run_name_map.get(r, r) if run_name_map else r for r in runs]
     run_colors = _assign_category_colors(runs, cat_map)
+    run_hatches = _assign_category_hatches(runs, cat_map, run_hatch_map)
     positions, cluster_spans, cluster_centers = _compute_positions(
         runs, cat_map, box_width, group_spacing, category_gap
     )
@@ -269,13 +326,13 @@ def plot_auc_boxplots(
     for ax, option in zip(axes, options):
         subset = df[df["option"] == option]
         data_by_run = [subset[subset["run"] == run][metric].values for run in runs]
-        _plot_group(ax, data_by_run, runs, run_colors, positions, box_width)
+        _plot_group(ax, data_by_run, runs, run_colors, run_hatches, positions, box_width)
         _finish_panel(ax, options_map[option], dict(fontweight="bold"))
 
     if add_average:
         ax = axes[-1]
         data_by_run = [df[df["run"] == run][metric].values for run in runs]
-        _plot_group(ax, data_by_run, runs, run_colors, positions, box_width)
+        _plot_group(ax, data_by_run, runs, run_colors, run_hatches, positions, box_width)
         _finish_panel(ax, "Average", dict(fontweight="normal", style="italic"))
 
     axes[0].set_ylabel(metric_map[metric], fontsize=10)
@@ -295,6 +352,7 @@ def plot_auc_boxplots(
         legend_ax_rect=[0.03, legend_bottom, 0.94, legend_height],
         runs_by_cat=runs_by_cat,
         run_colors=run_colors,
+        run_hatches=run_hatches,
     )
     out = os.path.join(path, f"{metric}_boxplots.png")
     plt.savefig(out, dpi=350, bbox_inches="tight")
@@ -329,13 +387,13 @@ if __name__ == "__main__":
         "po_bbce",
         "pa_bce",
         "pa_bbce",
-        "po_dme_pa_bipp",
+        "po_dme_pa_dme",
+        "po_bbce_pa_bbce",
         "po_dme_pa_bce",
         "po_dme_pa_bbce",
-        "po_bbce_pa_bbce",
         "po_bbce_pa_bbce_wpocov",
         "po_dme_pa_bbce_wpocov",
-        "po_dme_pa_dme",
+        "po_dme_pa_bipp",
 
     ]
 
@@ -345,7 +403,7 @@ if __name__ == "__main__":
         "pa_bce":          "PA BCE",
         "pa_bbce":         "PA Bal. BCE",
         "po_balanced_bce": "PO Balanced BCE",
-        "po_dme_pa_bipp":  "PO DeepMaxent + PA BIPP",
+        "po_dme_pa_bipp":  "PO DeepMaxent + PA Bal. IPP",
         "po_dme_pa_bce":   "PO DeepMaxent + PA BCE",
         "po_dme_pa_dme":   "PO DeepMaxent + PA DeepMaxent",
         "po_dme_pa_bbce":  "PO DeepMaxent + PA Bal. BCE",
@@ -353,6 +411,13 @@ if __name__ == "__main__":
         "po_bbce_pa_bbce_wpocov": "PO Bal. BCE + PA Bal. BCE (w_po_cov)",
         "po_dme_pa_bbce_wpocov": "PO DeepMaxent + PA Bal. BCE (w_po_cov)"
 
+    }
+
+    # Example: give the "w_po_cov" variants a hatch so they stand out even
+    # though they share a color family with their non-wpocov siblings.
+    run_hatch_map = {
+        # "po_bbce_pa_bbce_wpocov": "///",
+        # "po_dme_pa_bbce_wpocov": "///",
     }
 
     metric_map = {
@@ -363,6 +428,7 @@ if __name__ == "__main__":
     plot_auc_boxplots(output_dir,
                        run_order=run_order,
                        run_name_map=run_name_map,
+                       run_hatch_map=run_hatch_map,
                        metric=args.metric,
                        metric_map=metric_map,
                        add_average=args.add_average)

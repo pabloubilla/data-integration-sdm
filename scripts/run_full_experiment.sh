@@ -55,6 +55,14 @@ for dataset in "${datasets[@]}"; do
             $PYTHON -u scripts/plots/splits_boxplot.py \
                 --dataset_name "$dataset" \
                 --split_type "$split_type" \
+                --add_average \
+                $overlap
+
+            $PYTHON -u scripts/plots/splits_boxplot.py \
+                --dataset_name "$dataset" \
+                --split_type "$split_type" \
+                --metric avg_auc_site \
+                --add_average
                 $overlap
         done
     done

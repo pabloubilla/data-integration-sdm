@@ -170,17 +170,17 @@ def main(dataset_name: str = "GeoPlant", split_type: str = "geographical", use_o
                 criterion_po=BalancedBCELoss(), criterion_pa=BalancedBCELoss(), concat_sources=False,
             ),
         ),
-        # RunConfig(
-        #     name="po_dme_pa_bipp",
-        #     fn=run_one_split_popa,
-        #     enabled=run_popa,
-        #     kwargs=dict(
-        #         batch_size=batch_size_popa, epochs=epochs_popa, lr=lr_popa,
-        #         weight_decay=weight_decay_popa, hidden_dim=hidden_dim_popa,
-        #         hidden_layers=hidden_layers_popa, w_pa=w_pa_popa, return_logits=False,
-        #         criterion_po=DeepMaxEntLoss(), criterion_pa=BernoulliFromLogRateLoss(balance_pos=True), concat_sources=False,
-        #     ),
-        # ),
+        RunConfig(
+            name="po_dme_pa_bipp",
+            fn=run_one_split_popa,
+            enabled=run_popa,
+            kwargs=dict(
+                batch_size=batch_size_popa, epochs=epochs_popa, lr=lr_popa,
+                weight_decay=weight_decay_popa, hidden_dim=hidden_dim_popa,
+                hidden_layers=hidden_layers_popa, w_pa=w_pa_popa, return_logits=False,
+                criterion_po=DeepMaxEntLoss(), criterion_pa=BernoulliFromLogRateLoss(balance_pos=True), concat_sources=False,
+            ),
+        ),
         RunConfig(
             name="po_dme_pa_bbce",
             fn=run_one_split_popa,

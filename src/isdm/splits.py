@@ -28,7 +28,8 @@ from torch import nn
 
 from isdm.load_data import load_geoplant_processed
 from isdm.datasets import MultiLabelDataset, collate_multilabel
-from isdm.models import MLP, BalancedBCELoss, DeepMaxEntLoss, BernoulliFromLogRateLoss, IntegratedLoss
+from isdm.models import MLP
+from isdm.losses import  BalancedBCELoss, DeepMaxEntLoss, BernoulliFromLogRateLoss, IntegratedLoss
 from isdm.train import train_single_source, train_double_source
 from isdm.evaluation import predict_logits, per_species_auc_sparse, per_site_auc_sparse, LogitsStore
 from isdm.utils import get_overlapping_species_subset, set_all_seeds, get_device, filter_and_remap
@@ -372,7 +373,6 @@ def make_loader(X, y_lists, num_classes: int, batch_size: int, shuffle: bool):
     )
 
 
-# TODO: Check for the overlap between species, it should apply to both PO and PA and integrated splits.
 def run_one_split_pa(
     *,
     split_row,

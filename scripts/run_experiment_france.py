@@ -18,13 +18,8 @@ from torch import nn
 
 from isdm.load_data import load_geoplant_processed
 from isdm.datasets import MultiLabelDataset, collate_multilabel
-from isdm.models import (
-    MLP,
-    DeepMaxEntLoss,
-    BalancedBCELoss,
-    IntegratedLoss,
-    BernoulliFromLogRateLoss,
-)
+from isdm.models import MLP
+from isdm.losses import DeepMaxEntLoss, BalancedBCELoss, IntegratedLoss, BernoulliFromLogRateLoss
 from isdm.train import train_single_source, train_double_source
 from isdm.train import train_single_source
 from isdm.evaluation import predict_logits, per_species_auc_sparse

@@ -37,8 +37,8 @@ echo
 # /home/pubillap/.conda/envs/eco/bin/python -u scripts/run_integration_experiment.py 
 
 # /home/pubillap/.conda/envs/eco/bin/python -u scripts/run_split_sweep.py --dataset_name GeoPlant 
-/home/pubillap/.conda/envs/eco/bin/python -u scripts/run_integration_experiment.py 
-
+# /home/pubillap/.conda/envs/eco/bin/python -u scripts/run_integration_experiment.py 
+/home/pubillap/.conda/envs/eco/bin/python -u scripts/tune_split.py 
 
 # -c 'import torch; print("Test run");print("cuda available:", torch.cuda.is_available()); print("device:", torch.cuda.get_device_name(0) if torch.cuda.is_available() else "none")'
 echo

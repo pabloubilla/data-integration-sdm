@@ -24,7 +24,7 @@ import numpy as np
 import pandas as pd
 
 from isdm.load_data import load_geoplant_processed
-from isdm.splits import load_split_specs, load_split_indices
+from isdm.splits import load_split_specs, run_one_split_popa_tunable
 from isdm.utils import set_all_seeds
 from isdm.tune import run_grid_search, make_param_grid
 from isdm.splits import run_one_split_pa, run_one_split_popa  # reuse existing fns
@@ -43,13 +43,15 @@ PARAM_GRID_PA = {
 }
 
 PARAM_GRID_PO_PA = {
-    "lr":           [1e-4],
-    "weight_decay": [1e-3],
-    "hidden_dim":   [128],
+    "lr":            [1e-4],
+    "weight_decay":  [1e-3],
+    "hidden_dim":    [128],
     "hidden_layers": [2],
-    "batch_size": [126], 
-    "epochs": [10, 20, 30], 
-    "w_pa": [.5, 2],  # relative weight of PA loss vs PO loss
+    "batch_size":    [126],
+    "epochs":        [10, 20, 30],
+    "w_pa":          [.5, 2],
+    "loss_po_name":  ["deep_maxent", "balanced_bce"],          # add more names once you have X2 etc.
+    "loss_pa_name": ["deep_maxent", "balanced_bce"],        # uncomment to sweep PA loss too
 }
 
 # Fixed across all trials
@@ -118,13 +120,13 @@ def pivot_auc_by_option(df: pd.DataFrame) -> pd.DataFrame:
 
 def main(test_number: int):
 
-    run_pa = True
+    run_pa = False
     run_popa = True
 
     set_all_seeds(FIXED["seed"])
 
     data_path  = "data/processed/GeoPlant/france"
-    split_dir  = Path("outputs/splits/france")
+    split_dir  = Path("outputs/splits/GeoPlant/france_bands/environmental") # TODO: This might need a builder as we can take different paths
     output_dir = Path(f"outputs/tune/test_{test_number}")
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -186,12 +188,14 @@ def main(test_number: int):
         print("  PO+PA GRID SEARCH")
         print("█"*60)
 
+        tunable_keys_popa = list(PARAM_GRID_PO_PA.keys())
+
         results_popa = run_grid_search(
             param_grid=PARAM_GRID_PO_PA,
             splits=[row for _, row in splits_for_test.iterrows()],
-            run_fn=run_one_split_popa,
+            run_fn=run_one_split_popa_tunable,
             fixed_kwargs=shared_fixed,
-            param_keys=tunable_keys,
+            param_keys=tunable_keys_popa,
             results_path=output_dir / "results_popa.json",
             combo_label_fn=combo_label,
         )

@@ -276,7 +276,5 @@ LOSS_REGISTRY = {
     "deep_maxent_bias": DeepMaxentLossBias,
     "bernoulli_from_log_rate": BernoulliFromLogRateLoss,
     "poisson_log_rate": PoissonLogRateLoss,
-    "bias_l2": BiasL2Penalty,
-    "integrated": IntegratedLoss,
     "abn": ABNLoss,
 }

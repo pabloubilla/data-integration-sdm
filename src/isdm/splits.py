@@ -29,7 +29,7 @@ from torch import nn
 from isdm.load_data import load_geoplant_processed
 from isdm.datasets import MultiLabelDataset, collate_multilabel
 from isdm.models import MLP
-from isdm.losses import  BalancedBCELoss, DeepMaxEntLoss, BernoulliFromLogRateLoss, IntegratedLoss
+from isdm.losses import  BalancedBCELoss, DeepMaxEntLoss, BernoulliFromLogRateLoss, IntegratedLoss, LOSS_REGISTRY
 from isdm.train import train_single_source, train_double_source
 from isdm.evaluation import predict_logits, per_species_auc_sparse, per_site_auc_sparse, LogitsStore
 from isdm.utils import get_overlapping_species_subset, set_all_seeds, get_device, filter_and_remap
@@ -569,6 +569,19 @@ def run_one_split_pa(
         "y_test": y_test,
     }
 
+def run_one_split_popa_tunable(*, loss_po_name: str, loss_pa_name: str = "balanced_bce", **kwargs):
+    """
+    Thin wrapper around run_one_split_popa that resolves loss names
+    (from LOSS_REGISTRY) into instantiated loss objects, so loss choice
+    can be swept as a plain string param in the grid search.
+    """
+    criterion_po = LOSS_REGISTRY[loss_po_name]()
+    criterion_pa = LOSS_REGISTRY[loss_pa_name]()
+    return run_one_split_popa(
+        criterion_po=criterion_po,
+        criterion_pa=criterion_pa,
+        **kwargs,
+    )
 def run_one_split_popa(
     *,
     split_row,

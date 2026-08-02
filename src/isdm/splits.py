@@ -781,6 +781,7 @@ def run_one_split_popa(
         f"PO+PA | {split_row['split_id']} | "
         f"distance={split_row['distance']:.4f} | "
         f"avg_auc_site={avg_auc_site:.4f} | "
+        f"avg_auc_species={avg_auc_species:.4f} | "
         f"valid_species={valid_species}/{num_classes}"
     )
 

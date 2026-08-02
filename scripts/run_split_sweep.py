@@ -8,7 +8,7 @@ import pandas as pd
 
 import argparse
 
-from isdm.models import BalancedBCELoss, BernoulliFromLogRateLoss, DeepMaxEntLoss, IntegratedLoss
+from isdm.losses import BalancedBCELoss, BernoulliFromLogRateLoss, DeepMaxEntLoss, IntegratedLoss
 
 from isdm.load_data import load_geoplant_processed
 

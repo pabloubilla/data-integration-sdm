@@ -42,16 +42,28 @@ PARAM_GRID_PA = {
     "epochs": [10, 20, 30], 
 }
 
+# PARAM_GRID_PO_PA = {
+#     "lr":            [1e-4],
+#     "weight_decay":  [1e-3],
+#     "hidden_dim":    [128],
+#     "hidden_layers": [2],
+#     "batch_size":    [126],
+#     "epochs":        [10, 20, 30],
+#     "w_pa":          [.5, 2],
+#     "loss_po_name":  ["deep_maxent", "balanced_bce"],          # add more names once you have X2 etc.
+#     "loss_pa_name": ["deep_maxent", "balanced_bce"],        # uncomment to sweep PA loss too
+# }
+
 PARAM_GRID_PO_PA = {
-    "lr":            [1e-4],
-    "weight_decay":  [1e-3],
+    "lr":            [1e-4, 1e-3],
+    "weight_decay":  [1e-3, 1e-2],
     "hidden_dim":    [128],
     "hidden_layers": [2],
     "batch_size":    [126],
-    "epochs":        [10, 20, 30],
-    "w_pa":          [.5, 2],
-    "loss_po_name":  ["deep_maxent", "balanced_bce"],          # add more names once you have X2 etc.
-    "loss_pa_name": ["deep_maxent", "balanced_bce"],        # uncomment to sweep PA loss too
+    "epochs":        [15],
+    "w_pa":          [.5,1,2,4],
+    "loss_po_name":  ["deep_maxent"],          # add more names once you have X2 etc.
+    "loss_pa_name": ["balanced_bce"],        # uncomment to sweep PA loss too
 }
 
 # Fixed across all trials
@@ -71,52 +83,68 @@ def build_summary(results: list[dict], method: str) -> pd.DataFrame:
     Build a structured summary DataFrame from raw result dicts.
 
     Columns:
-        param_*         — the hyperparameter values for this trial
-        option          — split option label (e.g. "A", "B", "C")
-        distance        — spatial distance of the split
-        avg_auc         — main metric
-        method          — "pa" or "popa"
+        param_*            — the hyperparameter values for this trial
+        option             — closest,middle,farthest
+        distance           — spatial distance of the split
+        avg_auc_site       — site-level AUC
+        avg_auc_species    — species-level AUC
+        mean_auc           — arithmetic mean of the two AUCs
+        harmonic_mean_auc  — harmonic mean of the two AUCs (penalizes imbalance)
+        method             — "pa" or "popa"
     """
     df = pd.DataFrame(results)
     df["method"] = method
 
+    df["mean_auc"] = df[["avg_auc_site", "avg_auc_species"]].mean(axis=1)
+
+    a, b = df["avg_auc_site"], df["avg_auc_species"]
+    df["harmonic_mean_auc"] = np.where(
+        (a > 0) & (b > 0),
+        2 * a * b / (a + b),
+        0.0,
+    )
+
     param_cols = [c for c in df.columns if c.startswith("param_")]
     meta_cols  = ["method", "test_number", "option", "distance", "train_size", "test_size"]
-    metric_cols = ["avg_auc"]
+    metric_cols = ["avg_auc_site", "avg_auc_species", "mean_auc", "harmonic_mean_auc"]
 
-    # Put param cols first for readability
     ordered = param_cols + meta_cols + metric_cols
-    ordered = [c for c in ordered if c in df.columns]  # only keep what exists
+    ordered = [c for c in ordered if c in df.columns]
     return df[ordered].sort_values(param_cols + ["distance"])
 
-
-def pivot_auc_by_option(df: pd.DataFrame) -> pd.DataFrame:
+def best_result_per_model_and_distance(
+    summary_df: pd.DataFrame,
+    loss_cols: list[str] = ["param_loss_po_name", "param_loss_pa_name"],
+) -> pd.DataFrame:
     """
-    Pivot so each row = one param combo, columns = option AUC values.
-
-    Useful for seeing at a glance which combo is best across all distances.
-
-        param_lr | param_wd | ... | AUC_option_A | AUC_option_B | AUC_option_C | mean_auc
+    For each (loss combo, option) pair, find the single best-performing
+    param combo by harmonic_mean_auc — i.e. best hyperparameters PER
+    DISTANCE/OPTION, not averaged across splits. If you want the version
+    averaged across all splits/options, use best_result_per_loss_combo
+    instead (no 'option' in the groupby).
     """
-    param_cols = [c for c in df.columns if c.startswith("param_")]
+    param_cols = [c for c in summary_df.columns if c.startswith("param_")]
 
-    pivot = df.pivot_table(
-        index=param_cols,
-        columns="option",
-        values="avg_auc",
-        aggfunc="mean",   # in case of duplicates
-    ).reset_index()
+    df = summary_df.copy()
+    df["mean_auc"] = df[["avg_auc_site", "avg_auc_species"]].mean(axis=1)
+    a, b = df["avg_auc_site"], df["avg_auc_species"]
+    df["harmonic_mean_auc"] = np.where((a > 0) & (b > 0), 2 * a * b / (a + b), 0.0)
 
-    # Rename option columns to be explicit
-    option_cols = [c for c in pivot.columns if c not in param_cols]
-    pivot.rename(columns={c: f"AUC_option_{c}" for c in option_cols}, inplace=True)
+    missing = [c for c in loss_cols if c not in df.columns]
+    if missing:
+        raise ValueError(f"loss_cols not found in summary: {missing}")
 
-    auc_cols = [c for c in pivot.columns if c.startswith("AUC_")]
-    pivot["mean_auc"] = pivot[auc_cols].mean(axis=1)
-    pivot = pivot.sort_values("mean_auc", ascending=False)
+    best = (
+        df
+        .sort_values("harmonic_mean_auc", ascending=False)
+        .groupby(loss_cols + ["option"], as_index=False)
+        .head(1)
+        .sort_values(["option", "harmonic_mean_auc"], ascending=[True, False])
+    )
 
-    return pivot
-
+    ordered = param_cols + ["option", "distance", "avg_auc_site", "avg_auc_species", "mean_auc", "harmonic_mean_auc"]
+    ordered = [c for c in ordered if c in best.columns]
+    return best[ordered]
 
 def main(test_number: int):
 
@@ -212,12 +240,10 @@ def main(test_number: int):
         combined = pd.concat([summary_pa, summary_popa], ignore_index=True)
         combined.to_csv(output_dir / "summary_combined.csv", index=False)
 
-    # Pivot tables: one row per combo, AUC per option as separate columns
-    if run_pa: pivot_pa   = pivot_auc_by_option(summary_pa)
-    if run_popa: pivot_popa = pivot_auc_by_option(summary_popa)
+    if run_popa:
+        best_popa = best_result_per_model_and_distance(summary_popa)
+        best_popa.to_csv(output_dir / "best_popa.csv", index=False)
 
-    if run_pa: pivot_pa.to_csv(output_dir / "pivot_pa.csv", index=False)
-    if run_popa: pivot_popa.to_csv(output_dir / "pivot_popa.csv", index=False)
     # ── Console report ───────────────────────────────────────────────────
     if run_pa:
         print("\n\n" + "="*60)
@@ -239,7 +265,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--test_number",
         type=int,
-        default=0,
+        default=1,
         help="Which test_number to run the grid search on (default: 0)",
     )
     args = parser.parse_args()

@@ -11,38 +11,102 @@ from typing import Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+# BCEWithLogitsLoss
+from torch.nn import BCEWithLogitsLoss
 
 
 ## Balanced Binary Cross-Entropy Loss: automatically balances to be 50-50
+# class BalancedBCELoss(nn.Module):
+#     def __init__(self, eps: float = 1e-8, clamp=None, log_ratio: bool = False):
+#         super().__init__()
+#         self.eps = eps
+#         self.clamp = clamp
+#         self.log_ratio = log_ratio
+
+#     def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+#         """
+#         logits:  raw model outputs (before sigmoid)
+#         targets: binary labels {0,1}
+#         """
+#         targets = targets.float()
+
+#         n_pos = targets.sum()
+#         n_neg = targets.numel() - n_pos
+
+#         pos_weight = n_neg / (n_pos + self.eps)
+#         pos_weight = pos_weight.to(logits.device, logits.dtype)
+
+#         print(targets)
+#         print(pos_weight)
+#         exit()
+
+#         if self.log_ratio:
+#             pos_weight = 1 + torch.log(pos_weight + 1)
+
+#         if self.clamp is not None:
+#             pos_weight = pos_weight.clamp(max=self.clamp)
+
+#         # --- Original: PyTorch's built-in pos_weight + reduction='mean' ---
+#         # This divides by N (total elements), NOT by the sum of weights,
+#         # so the loss magnitude shifts with pos_weight instead of staying
+#         # normalized. 
+#         #
+#         # return F.binary_cross_entropy_with_logits(
+#         #     logits, targets, pos_weight=pos_weight
+#         # )
+
+#         # --- Corrected: apply weight then divide by 2*n_neg as this is the inflated number of samples ---
+#         per_elem_loss = F.binary_cross_entropy_with_logits(logits, targets, reduction="none") # this version is supposed to be stable
+#         weight = targets * pos_weight + (1.0 - targets)   # pos_weight for positives, 1 for negatives
+#         print('check')
+#         print(weight.sum(), 2*n_neg)
+#         exit()
+#         loss = (per_elem_loss * weight).sum() / weight.sum().clamp_min(self.eps)
 class BalancedBCELoss(nn.Module):
-    def __init__(self, eps: float = 1e-8, clamp=None, log_ratio: bool = False):
+    def __init__(self, clamp=None, log_ratio: bool = False):
         super().__init__()
-        self.eps = eps
         self.clamp = clamp
         self.log_ratio = log_ratio
 
     def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
         """
-        logits:  raw model outputs (before sigmoid)
-        targets: binary labels {0,1}
+        logits:  (B, C) raw model outputs (before sigmoid)
+        targets: (B, C) binary labels {0,1}
         """
         targets = targets.float()
 
-        n_pos = targets.sum()
-        n_neg = targets.numel() - n_pos
+        n_pos = targets.sum(dim=0)                     # (C,) per-species positive count
+        n_neg = targets.shape[0] - n_pos                # (C,) per-species negative count
 
-        pos_weight = n_neg / (n_pos + self.eps)
+        pos_weight = torch.where(
+            n_pos > 0,
+            n_neg / n_pos,
+            torch.zeros_like(n_pos),
+        )
         pos_weight = pos_weight.to(logits.device, logits.dtype)
 
         if self.log_ratio:
-            pos_weight = 1 + torch.log(pos_weight + 1)
+            pos_weight = torch.where(
+                pos_weight > 0,
+                1 + torch.log(pos_weight + 1),
+                pos_weight,
+            )
 
         if self.clamp is not None:
             pos_weight = pos_weight.clamp(max=self.clamp)
 
-        return F.binary_cross_entropy_with_logits(
-            logits, targets, pos_weight=pos_weight
+        # # old version (directly with pytorch)
+        # if True:
+        #     pos_weight = n_neg.sum()/n_pos.sum()
+        #     return F.binary_cross_entropy_with_logits(logits, targets, pos_weight=pos_weight, reduction="mean")
+
+        per_elem_loss = F.binary_cross_entropy_with_logits(
+            logits, targets, reduction="none"
         )
+
+        weight = targets * pos_weight + (1.0 - targets)
+
+        return (per_elem_loss * weight).sum() / weight.sum().clamp_min(1e-8)
 
 
 ## DeepMaxEntLoss: Based on Ryckewaert
@@ -277,4 +341,5 @@ LOSS_REGISTRY = {
     "bernoulli_from_log_rate": BernoulliFromLogRateLoss,
     "poisson_log_rate": PoissonLogRateLoss,
     "abn": ABNLoss,
+    "bce": BCEWithLogitsLoss
 }

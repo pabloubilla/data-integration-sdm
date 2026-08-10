@@ -12,19 +12,66 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 
-def make_param_grid(grid: Dict[str, List[Any]]) -> List[Dict[str, Any]]:
+
+def make_param_grid(
+    grid: Dict[str, List[Any]],
+    linked: Optional[Dict[tuple, List[tuple]]] = None,
+) -> List[Dict[str, Any]]:
     """
-    Expand a dict-of-lists into a list of all combinations.
+    Expand param combos, with optional "linked" groups of params that move
+    together as fixed tuples instead of being cross-produced independently.
+
+    `grid` behaves exactly as before — full cross product of every key.
+
+    `linked` lets you say "these N params only take these specific
+    combinations" instead of the full cross product of their individual
+    values. Each entry is:
+        (key1, key2, ...) -> [(val1, val2, ...), (val1, val2, ...), ...]
+
+    Multiple linked groups are independent of each other and DO cross-
+    multiply against each other and against `grid` — only params within
+    the same group are locked together.
 
     Example:
-        make_param_grid({"lr": [1e-3, 1e-4], "wd": [0, 1e-4]})
-        → [{"lr": 1e-3, "wd": 0}, {"lr": 1e-3, "wd": 1e-4},
-           {"lr": 1e-4, "wd": 0}, {"lr": 1e-4, "wd": 1e-4}]
+        make_param_grid(
+            grid={"epochs": [10, 20]},
+            linked={
+                ("loss_po_name", "loss_pa_name"): [
+                    ("deep_maxent", "balanced_bce"),
+                    ("balanced_bce", "balanced_bce"),
+                ],
+                ("lr", "weight_decay"): [
+                    (1e-3, 1e-2),   # high lr paired with high wd
+                    (1e-4, 1e-4),   # low lr paired with low wd
+                ],
+            },
+        )
+        → 2 epochs × 2 loss-pairs × 2 (lr,wd)-pairs = 8 combos total,
+          but NEVER e.g. lr=1e-3 paired with weight_decay=1e-4 —
+          only the pairs you explicitly listed.
     """
     keys = list(grid.keys())
     values = list(grid.values())
-    return [dict(zip(keys, combo)) for combo in itertools.product(*values)]
+    base_combos = (
+        [dict(zip(keys, combo)) for combo in itertools.product(*values)]
+        if keys else [{}]
+    )
 
+    if not linked:
+        return base_combos
+
+    linked_key_groups = list(linked.keys())
+    linked_value_lists = list(linked.values())
+
+    final_combos = []
+    for base in base_combos:
+        for linked_choice in itertools.product(*linked_value_lists):
+            combo = dict(base)
+            for key_group, values_tuple in zip(linked_key_groups, linked_choice):
+                combo.update(dict(zip(key_group, values_tuple)))
+            final_combos.append(combo)
+
+    return final_combos
 
 def run_grid_search(
     *,
@@ -33,6 +80,7 @@ def run_grid_search(
     run_fn: Callable[..., Dict[str, Any]],    # run_one_split_pa / run_one_split_popa
     fixed_kwargs: Dict[str, Any],             # everything that doesn't change (data, dirs, etc.)
     param_keys: List[str],                    # which keys to forward from each combo to run_fn
+    linked_param_grid: Optional[Dict[tuple, List[tuple]]] = None, # Grid can be linked (meaning some parameters are always used together)
     results_path: Optional[Path] = None,      # if set, saves running JSON after every trial
     combo_label_fn: Optional[Callable[[Dict], str]] = None,  # for pretty printing
 ) -> List[Dict[str, Any]]:
@@ -58,7 +106,7 @@ def run_grid_search(
         List of result dicts, one per (combo, split) trial.
     """
 
-    combos = make_param_grid(param_grid)
+    combos = make_param_grid(param_grid, linked_param_grid)
     all_results: List[Dict[str, Any]] = []
 
     total = len(combos) * len(splits)

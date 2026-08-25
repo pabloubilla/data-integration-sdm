@@ -13,119 +13,38 @@ import torch.nn as nn
 import torch.nn.functional as F
 # BCEWithLogitsLoss
 from torch.nn import BCEWithLogitsLoss
-
-
-## Balanced Binary Cross-Entropy Loss: automatically balances to be 50-50
-# class BalancedBCELoss(nn.Module):
-#     def __init__(self, eps: float = 1e-8, clamp=None, log_ratio: bool = False):
-#         super().__init__()
-#         self.eps = eps
-#         self.clamp = clamp
-#         self.log_ratio = log_ratio
-
-#     def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-#         """
-#         logits:  raw model outputs (before sigmoid)
-#         targets: binary labels {0,1}
-#         """
-#         targets = targets.float()
-
-#         n_pos = targets.sum()
-#         n_neg = targets.numel() - n_pos
-
-#         pos_weight = n_neg / (n_pos + self.eps)
-#         pos_weight = pos_weight.to(logits.device, logits.dtype)
-
-#         print(targets)
-#         print(pos_weight)
-#         exit()
-
-#         if self.log_ratio:
-#             pos_weight = 1 + torch.log(pos_weight + 1)
-
-#         if self.clamp is not None:
-#             pos_weight = pos_weight.clamp(max=self.clamp)
-
-#         # --- Original: PyTorch's built-in pos_weight + reduction='mean' ---
-#         # This divides by N (total elements), NOT by the sum of weights,
-#         # so the loss magnitude shifts with pos_weight instead of staying
-#         # normalized. 
-#         #
-#         # return F.binary_cross_entropy_with_logits(
-#         #     logits, targets, pos_weight=pos_weight
-#         # )
-
-#         # --- Corrected: apply weight then divide by 2*n_neg as this is the inflated number of samples ---
-#         per_elem_loss = F.binary_cross_entropy_with_logits(logits, targets, reduction="none") # this version is supposed to be stable
-#         weight = targets * pos_weight + (1.0 - targets)   # pos_weight for positives, 1 for negatives
-#         print('check')
-#         print(weight.sum(), 2*n_neg)
-#         exit()
-#         loss = (per_elem_loss * weight).sum() / weight.sum().clamp_min(self.eps)
-class BalancedBCELoss(nn.Module):
-    def __init__(self, clamp=None, log_ratio: bool = False):
-        super().__init__()
-        self.clamp = clamp
-        self.log_ratio = log_ratio
-
-    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-        """
-        logits:  (B, C) raw model outputs (before sigmoid)
-        targets: (B, C) binary labels {0,1}
-        """
-        targets = targets.float()
-
-        n_pos = targets.sum(dim=0)                     # (C,) per-species positive count
-        n_neg = targets.shape[0] - n_pos                # (C,) per-species negative count
-
-        pos_weight = torch.where(
-            n_pos > 0,
-            n_neg / n_pos,
-            torch.zeros_like(n_pos),
-        )
-        pos_weight = pos_weight.to(logits.device, logits.dtype)
-
-        if self.log_ratio:
-            pos_weight = torch.where(
-                pos_weight > 0,
-                1 + torch.log(pos_weight + 1),
-                pos_weight,
-            )
-
-        if self.clamp is not None:
-            pos_weight = pos_weight.clamp(max=self.clamp)
-
-        # # old version (directly with pytorch)
-        # if True:
-        #     pos_weight = n_neg.sum()/n_pos.sum()
-        #     return F.binary_cross_entropy_with_logits(logits, targets, pos_weight=pos_weight, reduction="mean")
-
-        per_elem_loss = F.binary_cross_entropy_with_logits(
-            logits, targets, reduction="none"
-        )
-
-        weight = targets * pos_weight + (1.0 - targets)
-
-        return (per_elem_loss * weight).sum() / weight.sum().clamp_min(1e-8)
+import functools
 
 
 ## DeepMaxEntLoss: Based on Ryckewaert
 class DeepMaxEntLoss(nn.Module):
-    def __init__(self, eps=1e-8, pos_weight=None):
-        super().__init__()
-        self.eps = eps
-        self.register_buffer("pos_weight", pos_weight if pos_weight is not None else None)
+    """
+    DeepMaxEnt loss (Ryckewaert), reduced as a mean over species present
+    in the batch:
 
-    def forward(self, input, target):
-        # input:  (B,C)
-        # target: (B,C) multi-hot
-        normalized_target = target / target.sum(dim=0).clamp_min(self.eps)
+        L = -(1/|K_B|) * sum_{j in K_B} sum_i (y_ij / n_j) * log_softmax(input)_ij
 
-        logp = input.log_softmax(dim=0)  # softmax over batch, per class
-        loss_num = -(normalized_target * logp).sum()
-        loss_den = len(target)
-        return loss_num / loss_den
+    where n_j = sum_b y_bj and K_B = {j : n_j > 0}. This keeps the loss
+    scale invariant to the number of species, whether present or absent
+    in a given batch, matching the normalization used by BalancedBCELoss.
+    """
 
+    def forward(self, input: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        n_pos = target.sum(dim=0)          # (C,)
+        has_pos = n_pos > 0
+
+        if not has_pos.any():
+            return (input.sum() * 0.0)
+
+        target = target[:, has_pos]
+        input = input[:, has_pos]
+        n_pos = n_pos[has_pos]
+
+        normalized_target = target / n_pos
+        logp = input.log_softmax(dim=0)
+
+        loss_per_class = -(normalized_target * logp).sum(dim=0)   # (C_present,)
+        return loss_per_class.mean()
 
 class DeepMaxentLossBias(nn.Module):
     def __init__(self, bias_l2: float = 1e-4):
@@ -146,38 +65,46 @@ class DeepMaxentLossBias(nn.Module):
         return poisson + self.bias_l2 * reg
 
 
+def compute_balanced_weight(target: torch.Tensor) -> torch.Tensor:
+    """
+    Per-species pos/neg balancing weight, shape (B, C) -> (B, C).
+    Each species column is scaled so positives and negatives contribute
+    equally to a weighted sum, regardless of that species' prevalence.
+    """
+    n_pos = target.sum(dim=0)
+    n_neg = target.shape[0] - n_pos
+
+    pos_weight = torch.where(n_pos > 0, n_neg / n_pos, torch.zeros_like(n_pos))
+    pos_weight = pos_weight.to(device=target.device, dtype=target.dtype)
+
+    return target * pos_weight + (1.0 - target)
+
+
+class BalancedBCELoss(nn.Module):
+    """Binary cross-entropy, balanced per species."""
+
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        targets = targets.float()
+        per_elem_loss = F.binary_cross_entropy_with_logits(logits, targets, reduction="none")
+        weight = compute_balanced_weight(targets)
+        return (per_elem_loss * weight).sum() / weight.sum().clamp_min(1e-8)
+
+
 class BernoulliFromLogRateLoss(nn.Module):
     """
     Bernoulli likelihood induced by Poisson intensity:
-
         lambda = exp(log_lambda)
-        P(y=1) = 1 - exp(-lambda)
-        P(y=0) = exp(-lambda)
+        P(y=1) = 1 - exp(-lambda), P(y=0) = exp(-lambda)
 
-    Useful for presence/absence when model outputs log-rate.
-
-    Args:
-        positive_only:  If True, only penalise false negatives (ignore true
-                        negatives).  Mutually exclusive with balance_pos.
-        eps:            Small constant for numerical stability.
-        balance_pos:    If True, up-weight positive samples so that positive
-                        and negative classes contribute equally to the loss,
-                        regardless of class imbalance.  Mutually exclusive
-                        with positive_only.
+    positive_only: penalise only false negatives, ignore true negatives.
+    balance_pos:   balance pos/neg contribution per species.
+    Mutually exclusive.
     """
 
-    def __init__(
-        self,
-        positive_only: bool = False,
-        eps: float = 1e-12,
-        balance_pos: bool = False,
-    ):
+    def __init__(self, positive_only: bool = False, eps: float = 1e-12, balance_pos: bool = False):
         super().__init__()
         if positive_only and balance_pos:
-            raise ValueError(
-                "`positive_only` and `balance_pos` are mutually exclusive: "
-                "balancing requires both positive and negative loss terms."
-            )
+            raise ValueError("`positive_only` and `balance_pos` are mutually exclusive.")
         self.positive_only = positive_only
         self.eps = eps
         self.balance_pos = balance_pos
@@ -190,22 +117,17 @@ class BernoulliFromLogRateLoss(nn.Module):
         log_p1 = torch.log(-torch.expm1(-lambda_) + self.eps)
 
         if self.positive_only:
-            loss = -(target * log_p1)
-            return loss.mean()
+            return -(target * log_p1).mean()
 
         loss = -(target * log_p1 + (1.0 - target) * log_p0)
 
         if self.balance_pos:
-            n_pos = target.sum()
-            n_neg = target.numel() - n_pos
-
-            pos_weight = (n_neg / (n_pos + self.eps)).to(
-                device=log_lambda.device, dtype=log_lambda.dtype
-            )
-            weight = target * pos_weight + (1.0 - target)
-            return (loss * weight).sum() / weight.sum()
+            weight = compute_balanced_weight(target)
+            return (loss * weight).sum() / weight.sum().clamp_min(self.eps)
 
         return loss.mean()
+
+
 
 
 class PoissonLogRateLoss(nn.Module):
@@ -336,6 +258,7 @@ class ABNLoss(nn.Module):
 # ─────────────────────────────────────────────
 LOSS_REGISTRY = {
     "balanced_bce": BalancedBCELoss,
+    "balanced_bce_ippp": functools.partial(BernoulliFromLogRateLoss, balance_pos=True), 
     "deep_maxent": DeepMaxEntLoss,
     "deep_maxent_bias": DeepMaxentLossBias,
     "bernoulli_from_log_rate": BernoulliFromLogRateLoss,

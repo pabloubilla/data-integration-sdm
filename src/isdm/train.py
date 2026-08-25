@@ -4,6 +4,8 @@ from torch import nn
 from torch.utils.data import DataLoader
 import itertools
 
+from typing import Callable  
+
 
 def train_single_source(
     model: nn.Module,
@@ -17,6 +19,10 @@ def train_single_source(
     optimizer_cls=torch.optim.Adam,
     wandb_run=None,
     grad_clip_norm: Optional[float] = None,
+    val_fn: Optional[Callable[[nn.Module], float]] = None,
+    val_mode: str = "max",
+    patience: Optional[int] = None,
+    restore_best_weights: bool = True,
 ) -> Dict[str, list]:
     """
     Generic trainer for one-source supervised training.
@@ -26,6 +32,14 @@ def train_single_source(
     - the criterion
     - the model
     - the W&B config, not inside this function
+
+    val_loader / val_loss: optional, computes LOSS on a held-out loader
+    using the same criterion as training.
+
+    val_fn: optional, called once per epoch as val_fn(model) and should
+    return a scalar METRIC (e.g. AUC), independent of val_loader/val_loss.
+    If set, history["val_metric"]/["best_epoch"]/["best_val"] are populated,
+    and training can early-stop via `patience`.
     """
 
     model.to(device)
@@ -45,8 +59,18 @@ def train_single_source(
         "val_loss": [],
         "lr": [],
     }
+    if val_fn is not None:
+        history["val_metric"] = []
 
     global_step = 0
+
+    best_val = float("-inf") if val_mode == "max" else float("inf")
+    best_epoch = 0
+    best_state_dict = None
+    epochs_without_improvement = 0
+
+    def _is_improvement(current, best):
+        return current > best if val_mode == "max" else current < best
 
     for epoch in range(1, epochs + 1):
         # ------------------
@@ -93,7 +117,7 @@ def train_single_source(
         train_loss = running_train / max(n_train, 1)
 
         # ------------------
-        # Validation
+        # Validation (loss, via val_loader)
         # ------------------
         val_loss = None
 
@@ -134,19 +158,54 @@ def train_single_source(
         if val_loss is not None:
             epoch_log["val/loss"] = val_loss
 
+        # ------------------
+        # Validation (metric, via val_fn) + early stopping
+        # ------------------
+        val_metric_str = ""
+        if val_fn is not None:
+            model.eval()
+            with torch.no_grad():
+                val_metric = val_fn(model)
+            history["val_metric"].append(val_metric)
+            epoch_log["val/metric"] = val_metric
+            val_metric_str = f" | val_metric={val_metric:.4f}"
+
+            if _is_improvement(val_metric, best_val):
+                best_val = val_metric
+                best_epoch = epoch
+                epochs_without_improvement = 0
+                if restore_best_weights:
+                    best_state_dict = {k: v.detach().clone() for k, v in model.state_dict().items()}
+            else:
+                epochs_without_improvement += 1
+
         if wandb_run is not None:
             wandb_run.log(epoch_log, step=global_step)
 
         if val_loss is None:
-            print(f"Epoch {epoch:03d} | train_loss={train_loss:.4f}")
+            print(f"Epoch {epoch:03d} | train_loss={train_loss:.4f}{val_metric_str}")
         else:
             print(
                 f"Epoch {epoch:03d} | "
                 f"train_loss={train_loss:.4f} | "
                 f"val_loss={val_loss:.4f}"
+                f"{val_metric_str}"
             )
 
+        if val_fn is not None and patience is not None and epochs_without_improvement >= patience:
+            print(f"Early stopping at epoch {epoch} (no improvement for {patience} epochs, "
+                  f"best={best_val:.4f} @ epoch {best_epoch})")
+            break
+
+    if val_fn is not None:
+        if restore_best_weights and best_state_dict is not None:
+            model.load_state_dict(best_state_dict)
+            print(f"Restored model weights from best epoch {best_epoch} (val={best_val:.4f})")
+        history["best_epoch"] = best_epoch
+        history["best_val"] = best_val
+
     return history
+
 
 
 
@@ -168,20 +227,42 @@ def train_double_source(
     source2_name: str = "source2",
     grad_clip_norm: Optional[float] = None,
     cycle_shorter_loader: bool = True,
-    max_steps_per_epoch: Optional[int] = None
+    max_steps_per_epoch: Optional[int] = None,
+    # ── NEW: all four default to "off", so existing calls are unaffected ──
+    val_fn: Optional[Callable[[nn.Module], float]] = None,
+    val_mode: str = "max",
+    patience: Optional[int] = None,
+    restore_best_weights: bool = True,
 ) -> Dict[str, list]:
+    """
+    If val_fn is None (default), it does a normal run with number of epochs specified.
 
+    If val_fn is provided, it is called once per epoch as val_fn(model),
+    after that epoch's training, and should return a scalar validation
+    metric (model.eval() is set automatically before the call).
+
+    history["val_metric"]  — the metric at every epoch, in order
+    history["best_epoch"]  — the 1-indexed epoch with the best value
+    history["best_val"]    — that best value
+
+    val_mode: "max" if higher is better (e.g. AUC), "min" if lower is
+    better (e.g. a loss).
+
+    patience: if set, training stops early once `patience` epochs pass
+    with no improvement. If None, training always runs the full `epochs`
+    and best_epoch is simply whichever epoch was best along the way —
+    this is the mode you want for "discover how many epochs to use".
+
+    restore_best_weights: if True, model weights are rolled back to the
+    best epoch's weights before returning (only relevant if val_fn is set).
+    """
     model.to(device)
     print(f"Training on device: {device}")
 
     if isinstance(criterion, nn.Module):
         criterion.to(device)
 
-    optimizer = optimizer_cls(
-        model.parameters(),
-        lr=lr,
-        weight_decay=weight_decay,
-    )
+    optimizer = optimizer_cls(model.parameters(), lr=lr, weight_decay=weight_decay)
 
     history = {
         "train_loss": [],
@@ -189,7 +270,20 @@ def train_double_source(
         f"{source2_name}_loss": [],
     }
 
+    if val_fn is not None:
+        history["val_metric"] = []
+
     global_step = 0
+    print(f"{source1_name} loader len : {len(source1_loader)} | {source2_name} loader len : {len(source2_loader)}")
+
+    # tracking validation
+    best_val = float("-inf") if val_mode == "max" else float("inf")
+    best_epoch = 0
+    best_state_dict = None
+    epochs_without_improvement = 0
+
+    def _is_improvement(current, best):
+        return current > best if val_mode == "max" else current < best
 
     for epoch in range(1, epochs + 1):
         model.train()
@@ -201,24 +295,14 @@ def train_double_source(
 
         if cycle_shorter_loader:
             max_len = max(len(source1_loader), len(source2_loader))
-
             if len(source1_loader) >= len(source2_loader):
-                iterator = zip(
-                    source1_loader,
-                    itertools.cycle(source2_loader),
-                )
+                iterator = zip(source1_loader, itertools.cycle(source2_loader))
             else:
-                iterator = zip(
-                    itertools.cycle(source1_loader),
-                    source2_loader,
-                )
-
+                iterator = zip(itertools.cycle(source1_loader), source2_loader)
             iterator = itertools.islice(iterator, max_len)
-
         else:
             iterator = zip(source1_loader, source2_loader)
-        
-        # Cap steps regardless of which branch was taken
+
         if max_steps_per_epoch is not None:
             iterator = itertools.islice(iterator, max_steps_per_epoch)
 
@@ -246,10 +330,7 @@ def train_double_source(
             loss.backward()
 
             if grad_clip_norm is not None:
-                torch.nn.utils.clip_grad_norm_(
-                    model.parameters(),
-                    grad_clip_norm,
-                )
+                torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
 
             optimizer.step()
 
@@ -284,22 +365,57 @@ def train_double_source(
         history[f"{source1_name}_loss"].append(epoch_s1)
         history[f"{source2_name}_loss"].append(epoch_s2)
 
+        log_dict = {
+            "train/loss": epoch_total,
+            f"train/{source1_name}_loss": epoch_s1,
+            f"train/{source2_name}_loss": epoch_s2,
+            "epoch": epoch,
+            "n_steps": n_steps,
+        }
+
+        # validation block — entirely skipped when val_fn is None
+        val_str = ""
+        if val_fn is not None:
+            model.eval()
+            with torch.no_grad():
+                val_metric = val_fn(model)
+            history["val_metric"].append(val_metric)
+            log_dict["val/metric"] = val_metric
+            val_str = f" | val={val_metric:.4f}"
+
+            if _is_improvement(val_metric, best_val):
+                best_val = val_metric
+                best_epoch = epoch
+                epochs_without_improvement = 0
+                if restore_best_weights:
+                    best_state_dict = {k: v.detach().clone() for k, v in model.state_dict().items()}
+            else:
+                epochs_without_improvement += 1
+
         if wandb_run is not None:
-            wandb_run.log(
-                {
-                    "train/loss": epoch_total,
-                    f"train/{source1_name}_loss": epoch_s1,
-                    f"train/{source2_name}_loss": epoch_s2,
-                    "epoch": epoch,
-                },
-                step=global_step,
-            )
+            wandb_run.log(log_dict, step=global_step)
 
         print(
             f"Epoch {epoch:03d} | "
             f"loss={epoch_total:.4f} | "
             f"{source1_name}={epoch_s1:.4f} | "
-            f"{source2_name}={epoch_s2:.4f}"
+            f"{source2_name}={epoch_s2:.4f} | "
+            f"n_steps={n_steps}"
+            f"{val_str}"
         )
+
+        # early stopping, only active if both val_fn and patience are set
+        if val_fn is not None and patience is not None and epochs_without_improvement >= patience:
+            print(f"Early stopping at epoch {epoch} (no improvement for {patience} epochs, "
+                  f"best={best_val:.4f} @ epoch {best_epoch})")
+            break
+
+    # restore best weights + finalize history, only if validation was used
+    if val_fn is not None:
+        if restore_best_weights and best_state_dict is not None:
+            model.load_state_dict(best_state_dict)
+            print(f"Restored model weights from best epoch {best_epoch} (val={best_val:.4f})")
+        history["best_epoch"] = best_epoch
+        history["best_val"] = best_val
 
     return history

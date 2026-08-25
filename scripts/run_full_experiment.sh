@@ -27,22 +27,22 @@ overlap_flags=("--use_overlapping_species")
 for dataset in "${datasets[@]}"; do
     echo "===== Dataset: $dataset ====="
 
-    # --- Preprocessing (once per dataset) ---
-    if [ "$dataset" == "GeoPlant" ]; then
-        echo "Preprocessing GeoPlant (BioClim)..."
-        $PYTHON -u scripts/preprocess_geoplant.py --vocab-mode intersection_po_pa
-    elif [ "$dataset" == "GeoPlant_AE" ]; then
-        echo "Preprocessing GeoPlant (AlphaEarth)..."
-        $PYTHON -u scripts/preprocess_geoplant_alphaearth.py --vocab-mode intersection_po_pa
-    fi
+    # # --- Preprocessing (once per dataset) ---
+    # if [ "$dataset" == "GeoPlant" ]; then
+    #     echo "Preprocessing GeoPlant (BioClim)..."
+    #     $PYTHON -u scripts/preprocess_geoplant.py --vocab-mode intersection_po_pa
+    # elif [ "$dataset" == "GeoPlant_AE" ]; then
+    #     echo "Preprocessing GeoPlant (AlphaEarth)..."
+    #     $PYTHON -u scripts/preprocess_geoplant_alphaearth.py --vocab-mode intersection_po_pa
+    # fi
 
     for split_type in "${split_types[@]}"; do
         echo "--- Split type: $split_type ---"
 
-        # --- Generate splits (once per dataset x split_type) ---
-        $PYTHON -u scripts/generate_pa_splits_v2.py \
-            --dataset_name "$dataset" \
-            --split_type "$split_type"
+        # # --- Generate splits (once per dataset x split_type) ---
+        # $PYTHON -u scripts/generate_pa_splits_v2.py \
+        #     --dataset_name "$dataset" \
+        #     --split_type "$split_type"
 
         for overlap in "${overlap_flags[@]}"; do
             echo "Running sweep (overlap flag: '${overlap:-none}')"

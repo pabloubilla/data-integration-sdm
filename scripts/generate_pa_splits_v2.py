@@ -31,32 +31,35 @@ def plot_splits_overview(
 ):
     """
     One panel per anchor row, one column per option (closest/middle/farthest).
-    Cluster positions inferred directly from spec indices — no label recomputation.
-    Panels are drawn on a cartopy PlateCarree basemap (coastline, borders,
-    land/ocean shading) so points sit on a recognizable map of France/Europe.
+    Only plain (non-validation) specs are used here — validation splits are
+    plotted separately by plot_validation_overview.
     """
     X_mat = X_pa[covs_plot].to_numpy()
     all_idx = np.arange(len(X_pa))
- 
+
     x_lim = (-5, 8.5)
     y_lim = (42, 51.5)
     proj = ccrs.PlateCarree()
- 
+
+    options_order = ("closest", "middle", "farthest")
+
+    # NEW: restrict to plain options only, so anchor 0's extra _val specs
+    # (same test_number, different option strings) don't get mixed in
     anchor_groups: dict[int, dict[str, SplitSpec]] = {}
     for spec in specs:
-        anchor_groups.setdefault(spec.test_number, {})[spec.option] = spec
- 
-    options_order = ("closest", "middle", "farthest")
+        if spec.option in options_order:
+            anchor_groups.setdefault(spec.test_number, {})[spec.option] = spec
+
     color_map = {
             "test": "#E7651F",
             "closest": "#1E88E5",
-            "middle": "#1E88E5", 
+            "middle": "#1E88E5",
             "farthest": "#1E88E5"
             }
     cx, cy = 0, 1
- 
+
     if nrows == -1:
-        nrows = len(anchor_groups) # use -1 to plot all anchors, else limit to nrows
+        nrows = len(anchor_groups)
     ncols = len(options_order)
     fig, axes = plt.subplots(
         nrows, ncols, figsize=(5 * ncols, 4 * nrows),
@@ -65,34 +68,30 @@ def plot_splits_overview(
     axes = np.atleast_2d(axes)
 
     anchor_items = sorted(anchor_groups.items())[:nrows]
- 
+
     for row, (anchor_ix, option_specs) in enumerate(anchor_items):
         any_spec = next(iter(option_specs.values()))
         test_idx = any_spec.test_idx
- 
-        # union of all train indices across options for this anchor
+
         all_train_idx = np.concatenate([s.train_idx for s in option_specs.values()])
         unused_idx = np.setdiff1d(
             np.setdiff1d(all_idx, test_idx),
             all_train_idx,
         )
- 
+
         for col, option in enumerate(options_order):
             ax = axes[row, col]
- 
-            # basemap: ocean/land shading, coastline, and country borders,
-            # drawn first (low zorder) so the scatter points sit on top
+
             ax.set_extent([*x_lim, *y_lim], crs=proj)
             ax.add_feature(cfeature.OCEAN, facecolor="#dceefb", zorder=0)
             ax.add_feature(cfeature.LAND, facecolor="#f7f5f0", zorder=0)
             ax.add_feature(cfeature.BORDERS, edgecolor="#999999", linewidth=0.6, zorder=0.5)
             ax.add_feature(cfeature.COASTLINE, edgecolor="#777777", linewidth=0.6, zorder=0.5)
             ax.add_feature(cfeature.LAKES, facecolor="#dceefb", edgecolor="#999999", linewidth=0.3, zorder=0.5)
- 
+
             spec = option_specs.get(option)
             train_idx = spec.train_idx if spec is not None else np.array([], dtype=np.int64)
- 
-            # plot each group as a single scatter call — much faster than per-cluster loop
+
             if len(unused_idx) > 0:
                 ax.scatter(X_mat[unused_idx, cx], X_mat[unused_idx, cy],
                            c="#bbbbbb", s=5, zorder=1, linewidths=0, transform=proj)
@@ -102,7 +101,7 @@ def plot_splits_overview(
             if len(test_idx) > 0:
                 ax.scatter(X_mat[test_idx, cx], X_mat[test_idx, cy],
                            c=color_map["test"], s=10, zorder=3, linewidths=0, transform=proj)
- 
+
             title = (
                 f"anchor {anchor_ix} | {option}\n"
                 f"dist={spec.distance:.3f} train={spec.train_size} test={spec.test_size}"
@@ -114,31 +113,120 @@ def plot_splits_overview(
             gl.right_labels = False
             gl.xlabel_style = {"size": 6}
             gl.ylabel_style = {"size": 6}
-            
-            # plot anchor
+
             anchor_x = any_spec.anchor[0]
             anchor_y = any_spec.anchor[1]
             ax.scatter(anchor_x, anchor_y, c="black", marker="X", s=100, zorder=4, transform=proj)
 
-        print('The anchor is:')
-        print(anchor_x, anchor_y)
- 
-
-
-    # legend_handles = [
-    #     mpatches.Patch(color="#e74c3c", label="test"),
-    #     mpatches.Patch(color=color_map["closest"], label="train closest"),
-    #     mpatches.Patch(color=color_map["middle"], label="train middle"),
-    #     mpatches.Patch(color=color_map["farthest"], label="train farthest"),
-    #     mpatches.Patch(color="#bbbbbb", label="unused"),
-    #     Line2D([0], [0], marker="X", color="w", markerfacecolor="black",
-    #         markeredgecolor="black", markersize=10, linestyle="none",
-    #         label="anchor"),
-    # ]
-    # fig.legend(handles=legend_handles, loc="lower center", ncol=5, fontsize=8, frameon=False)
     plt.tight_layout(rect=[0, 0.04, 1, 1])
- 
+
     out_path = output_dir / "splits_overview.png"
+    print(f"Saving plot to {out_path}...")
+    plt.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"Saved plot to {out_path}")
+
+
+def plot_validation_overview(
+    X_pa,
+    specs,
+    covs_plot: list[str],
+    output_dir: Path,
+):
+    """
+    Same panel layout as plot_splits_overview, but for the validation splits
+    only (option in {closest_val, middle_val, farthest_val}). There is only
+    one anchor with validation splits (the designated validation anchor), so
+    this is always a single row.
+    """
+    X_mat = X_pa[covs_plot].to_numpy()
+    all_idx = np.arange(len(X_pa))
+
+    x_lim = (-5, 8.5)
+    y_lim = (42, 51.5)
+    proj = ccrs.PlateCarree()
+
+    val_options_order = ("closest_val", "middle_val", "farthest_val")
+
+    anchor_groups: dict[int, dict[str, SplitSpec]] = {}
+    for spec in specs:
+        if spec.option in val_options_order:
+            anchor_groups.setdefault(spec.test_number, {})[spec.option] = spec
+
+    if not anchor_groups:
+        print("No validation specs found — skipping validation plot.")
+        return
+
+    color_map = {
+            "validation": "#8E44AD",
+            "closest_val": "#1E88E5",
+            "middle_val": "#1E88E5",
+            "farthest_val": "#1E88E5",
+            }
+    cx, cy = 0, 1
+
+    ncols = len(val_options_order)
+    anchor_items = sorted(anchor_groups.items())
+    nrows = len(anchor_items)
+
+    fig, axes = plt.subplots(
+        nrows, ncols, figsize=(5 * ncols, 4 * nrows),
+        subplot_kw={"projection": proj},
+    )
+    axes = np.atleast_2d(axes)
+
+    for row, (anchor_ix, option_specs) in enumerate(anchor_items):
+        any_spec = next(iter(option_specs.values()))
+        val_idx = any_spec.test_idx  # validation points are stored as test_idx for _val specs
+
+        all_train_idx = np.concatenate([s.train_idx for s in option_specs.values()])
+        unused_idx = np.setdiff1d(
+            np.setdiff1d(all_idx, val_idx),
+            all_train_idx,
+        )
+
+        for col, option in enumerate(val_options_order):
+            ax = axes[row, col]
+
+            ax.set_extent([*x_lim, *y_lim], crs=proj)
+            ax.add_feature(cfeature.OCEAN, facecolor="#dceefb", zorder=0)
+            ax.add_feature(cfeature.LAND, facecolor="#f7f5f0", zorder=0)
+            ax.add_feature(cfeature.BORDERS, edgecolor="#999999", linewidth=0.6, zorder=0.5)
+            ax.add_feature(cfeature.COASTLINE, edgecolor="#777777", linewidth=0.6, zorder=0.5)
+            ax.add_feature(cfeature.LAKES, facecolor="#dceefb", edgecolor="#999999", linewidth=0.3, zorder=0.5)
+
+            spec = option_specs.get(option)
+            train_idx = spec.train_idx if spec is not None else np.array([], dtype=np.int64)
+
+            if len(unused_idx) > 0:
+                ax.scatter(X_mat[unused_idx, cx], X_mat[unused_idx, cy],
+                           c="#bbbbbb", s=5, zorder=1, linewidths=0, transform=proj)
+            if len(train_idx) > 0:
+                ax.scatter(X_mat[train_idx, cx], X_mat[train_idx, cy],
+                           c=color_map[option], s=10, zorder=2, linewidths=0, transform=proj)
+            if len(val_idx) > 0:
+                ax.scatter(X_mat[val_idx, cx], X_mat[val_idx, cy],
+                           c=color_map["validation"], s=10, zorder=3, linewidths=0, transform=proj)
+
+            title = (
+                f"anchor {anchor_ix} | {option}\n"
+                f"dist={spec.distance:.3f} train={spec.train_size} val={spec.test_size}"
+                if spec else f"anchor {anchor_ix} | {option}\n(missing)"
+            )
+            ax.set_title(title, fontsize=8)
+            gl = ax.gridlines(draw_labels=True, linewidth=0.3, color="#cccccc", alpha=0.5)
+            gl.top_labels = False
+            gl.right_labels = False
+            gl.xlabel_style = {"size": 6}
+            gl.ylabel_style = {"size": 6}
+
+            anchor_x = any_spec.anchor[0]
+            anchor_y = any_spec.anchor[1]
+            ax.scatter(anchor_x, anchor_y, c="black", marker="X", s=100, zorder=4, transform=proj)
+
+    plt.tight_layout(rect=[0, 0.04, 1, 1])
+
+    out_path = output_dir / "splits_overview_validation.png"
     print(f"Saving plot to {out_path}...")
     plt.savefig(out_path, dpi=150, bbox_inches="tight")
     plt.close()
@@ -220,6 +308,13 @@ def main(dataset_name: str = "GeoPlant",
         covs_plot=covs_plot,
         output_dir=output_dir,
 )
+    
+    plot_validation_overview(
+        X_pa=X_pa.reset_index(drop=True),
+        specs=specs,
+        covs_plot=covs_plot,
+        output_dir=output_dir,
+    )
 
     metadata = {
         "data_path": data_path,

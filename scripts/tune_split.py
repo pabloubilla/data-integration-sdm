@@ -25,7 +25,7 @@ import pandas as pd
 from pyparsing import Any
 
 from isdm.load_data import load_geoplant_processed
-from isdm.splits import load_split_specs, run_one_split_pa, run_one_split_popa_tunable
+from isdm.splits import load_split_specs, run_one_split_po_or_pa, run_one_split_popa_tunable, run_one_split_po_or_pa_tunable
 from isdm.utils import set_all_seeds
 from isdm.tune import run_grid_search
 
@@ -36,39 +36,62 @@ import itertools
 # ─────────────────────────────────────────────
 #  Which methods to run
 # ─────────────────────────────────────────────
-RUN_PA = False
+RUN_PA = True
+RUN_PO = True
 RUN_POPA = True
 
 # ─────────────────────────────────────────────
 #  Hyperparameter grids — edit these to taste
 # ─────────────────────────────────────────────
+
+# constants for the validation-based epoch discovery
+EPOCHS_CEILING = 100
+VAL_PATIENCE = 5
+
 PARAM_GRID_PA = {
     "lr":            [1e-4],
     "weight_decay":  [1e-4, 1e-3],
     "hidden_dim":    [128],
     "hidden_layers": [2],
     "batch_size":    [500],
-    "epochs":        [10, 20, 30],
+    "loss_name":     ["balanced_bce"],
 }
 
-PARAM_GRID_PO_PA = {
-    "lr":            [0.001, 0.0001],
-    "weight_decay":  [1e-3, 1e-4],
+PARAM_GRID_PO = {
+    "lr":            [1e-4],
+    "weight_decay":  [1e-4, 1e-3],
     "hidden_dim":    [128],
-    "hidden_layers": [2,3],
-    "batch_size":    [126,512],
-    "epochs":        [15]
+    "hidden_layers": [2],
+    "batch_size":    [500],
+    "loss_name":     ["deep_maxent"],
+}
+
+PARAM_GRID_POPA = {
+    "lr":            [1e-3],
+    "weight_decay":  [1e-3],
+    "hidden_dim":    [128],
+    "hidden_layers": [2, 3],
+    "batch_size":    [100, 1000],
+    # "epochs":        [500] # remove epochs
 }
 
 LINKED_PARAM_GRID_PO_PA = {
     ("loss_po_name", "loss_pa_name"): [
+        ("deep_maxent", "balanced_bce_ippp"),
         ("deep_maxent", "balanced_bce"),
-        ("balanced_bce", "balanced_bce"),
+        ("balanced_bce", "balanced_bce")
+        
     ],
     ("w_pa", "w_po",): [   # a "group" of size 1 works too, if you just want an
-        (0.3,0.7),
+        # (0,1),             
+        # (0.1,0.9),
+        (0.2,0.8),
+        # (0.3,0.7),
         (0.5,0.5),    
-        (0.7,0.3),
+        # (0.7,0.3),
+        (0.8,0.2),
+        # (0.9,0.1),
+        # (1,0),
     ],
 }
 
@@ -111,7 +134,7 @@ def build_summary(results: list[dict], method: str) -> pd.DataFrame:
 
     param_cols = [c for c in df.columns if c.startswith("param_")]
     meta_cols = ["method", "test_number", "option", "distance", "train_size", "test_size"]
-    metric_cols = ["avg_auc_site", "avg_auc_species", "mean_auc", "harmonic_mean_auc"]
+    metric_cols = ["best_epoch", "avg_auc_site", "avg_auc_species", "mean_auc", "harmonic_mean_auc"]
 
     ordered = [c for c in param_cols + meta_cols + metric_cols if c in df.columns]
     return df[ordered].sort_values(param_cols + ["distance"])
@@ -149,6 +172,56 @@ def best_result_per_loss_and_option(
     keep_cols = [c for c in keep_cols if c in best.columns]
     return best[keep_cols]
 
+def best_result_per_loss(
+    summary_df: pd.DataFrame,
+    loss_cols: list[str] = LOSS_COLS,
+) -> pd.DataFrame:
+    """
+    Best param combo per loss combo, AVERAGED across all distances/options.
+
+    Unlike best_result_per_loss_and_option, this collapses distance first
+    (mean avg_auc_site / avg_auc_species per param combo across all splits),
+    then re-derives mean_auc / harmonic_mean_auc from those averaged AUCs,
+    and finally picks the single best param combo per loss.
+    """
+    missing = [c for c in loss_cols if c not in summary_df.columns]
+    if missing:
+        raise ValueError(f"loss_cols not found in summary: {missing}")
+
+    param_cols = [c for c in summary_df.columns if c.startswith("param_")]
+
+    agg = (
+        summary_df
+        .groupby(param_cols, dropna=False, as_index=False)
+        .agg(
+            avg_auc_site=("avg_auc_site", "mean"),
+            avg_auc_species=("avg_auc_species", "mean"),
+            best_epoch=("best_epoch", "mean"),
+            n_splits=("avg_auc_site", "size"),   # how many splits this combo was averaged over
+        )
+    )
+
+    agg["mean_auc"] = agg[["avg_auc_site", "avg_auc_species"]].mean(axis=1)
+    site, species = agg["avg_auc_site"], agg["avg_auc_species"]
+    agg["harmonic_mean_auc"] = np.where(
+        (site > 0) & (species > 0),
+        2 * site * species / (site + species),
+        0.0,
+    )
+
+    best = (
+        agg
+        .sort_values("harmonic_mean_auc", ascending=False)
+        .groupby(loss_cols, as_index=False)
+        .head(1)
+        .sort_values("harmonic_mean_auc", ascending=False)
+    )
+
+    keep_cols = param_cols + [
+        "n_splits", "best_epoch", "avg_auc_site", "avg_auc_species", "mean_auc", "harmonic_mean_auc",
+    ]
+    keep_cols = [c for c in keep_cols if c in best.columns]
+    return best[keep_cols]
 
 # ─────────────────────────────────────────────
 #  Main
@@ -157,16 +230,19 @@ def main(test_number: int):
     set_all_seeds(FIXED["seed"])
 
     data_path = "data/processed/GeoPlant/france"
-    split_dir = Path("outputs/splits/GeoPlant/france_bands/environmental")
+    split_dir = Path("outputs/splits/GeoPlant/france_bands/geographical")
     output_dir = Path(f"outputs/tune/test_{test_number}")
     output_dir.mkdir(parents=True, exist_ok=True)
 
     data = load_geoplant_processed(data_path)
     split_table = load_split_specs(split_dir)
-
     splits_for_test = split_table[split_table["test_number"] == test_number].reset_index(drop=True)
+
+    # exclusively against the held-out validation set
+    val_options = ("closest_val", "middle_val", "farthest_val")
+    splits_for_test = splits_for_test[splits_for_test["option"].isin(val_options)].reset_index(drop=True)
     if len(splits_for_test) == 0:
-        raise ValueError(f"No splits found for test_number={test_number}")
+        raise ValueError(f"No validation splits found for test_number={test_number}")
 
     options_found = splits_for_test["option"].unique().tolist()
     print(f"test_number={test_number} | {len(splits_for_test)} splits | options={options_found}")
@@ -178,6 +254,10 @@ def main(test_number: int):
         data=data,
         output_dir=output_dir,
         project_name="sdm-integration-tune",
+        # For Validation: fixed (not swept) — epochs is a ceiling, validation picks the real count
+        epochs=EPOCHS_CEILING,
+        validate_during_training=True,
+        val_patience=VAL_PATIENCE,
         **FIXED,
     )
 
@@ -185,6 +265,7 @@ def main(test_number: int):
         return "  ".join(f"{k}={v}" for k, v in combo.items())
 
     summary_pa = None
+    summary_po = None
     summary_popa = None
 
     # ── PA grid search ──────────────────────────────────────────────────
@@ -196,14 +277,32 @@ def main(test_number: int):
         results_pa = run_grid_search(
             param_grid=PARAM_GRID_PA,
             splits=split_rows,
-            run_fn=run_one_split_pa,
-            fixed_kwargs=shared_fixed,
-            param_keys=list(PARAM_GRID_PA.keys()),
+            run_fn=run_one_split_po_or_pa_tunable,
+            fixed_kwargs={**shared_fixed, "source": "pa"},
+            param_keys=list(PARAM_GRID_PA.keys()) + ["loss_name"],
             results_path=output_dir / "results_pa.json",
             combo_label_fn=combo_label,
         )
         summary_pa = build_summary(results_pa, method="pa")
         summary_pa.to_csv(output_dir / "summary_pa.csv", index=False)
+
+    # ── PO grid search ──────────────────────────────────────────────────
+    if RUN_PO:
+        print("\n\n" + "█" * 60)
+        print("  PO-ONLY GRID SEARCH")
+        print("█" * 60)
+
+        results_po = run_grid_search(
+            param_grid=PARAM_GRID_PO,
+            splits=split_rows,
+            run_fn=run_one_split_po_or_pa_tunable,
+            fixed_kwargs={**shared_fixed, "source": "po"},
+            param_keys=list(PARAM_GRID_PO.keys()) + ["loss_name"],
+            results_path=output_dir / "results_po.json",
+            combo_label_fn=combo_label,
+        )
+        summary_po = build_summary(results_po, method="po")
+        summary_po.to_csv(output_dir / "summary_po.csv", index=False)
 
     # ── POPA grid search ────────────────────────────────────────────────
     if RUN_POPA:
@@ -212,12 +311,12 @@ def main(test_number: int):
         print("█" * 60)
 
         tunable_keys_popa = (
-            list(PARAM_GRID_PO_PA.keys())
+            list(PARAM_GRID_POPA.keys())
             + [k for group in LINKED_PARAM_GRID_PO_PA.keys() for k in group]
         )
 
         results_popa = run_grid_search(
-            param_grid=PARAM_GRID_PO_PA,
+            param_grid=PARAM_GRID_POPA,
             splits=split_rows,
             run_fn=run_one_split_popa_tunable,
             fixed_kwargs=shared_fixed,
@@ -232,9 +331,13 @@ def main(test_number: int):
         best_popa = best_result_per_loss_and_option(summary_popa)
         best_popa.to_csv(output_dir / "best_popa.csv", index=False)
 
-    # ── Combined table (only if both ran) ──────────────────────────────
-    if summary_pa is not None and summary_popa is not None:
-        combined = pd.concat([summary_pa, summary_popa], ignore_index=True)
+        best_popa_avg = best_result_per_loss(summary_popa)
+        best_popa_avg.to_csv(output_dir / "best_popa_avg_over_distance.csv", index=False)
+
+    # ── Combined table (only if more than one method ran) ──────────────
+    all_summaries = [s for s in (summary_pa, summary_po, summary_popa) if s is not None]
+    if len(all_summaries) > 1:
+        combined = pd.concat(all_summaries, ignore_index=True)
         combined.to_csv(output_dir / "summary_combined.csv", index=False)
 
     # ── Console report ───────────────────────────────────────────────────
@@ -243,6 +346,12 @@ def main(test_number: int):
         print("  PA-ONLY SUMMARY")
         print("=" * 60)
         print(summary_pa.sort_values("distance").to_string(index=False))
+
+    if summary_po is not None:
+        print("\n\n" + "=" * 60)
+        print("  PO-ONLY SUMMARY")
+        print("=" * 60)
+        print(summary_po.sort_values("distance").to_string(index=False))
 
     if summary_popa is not None:
         print("\n\n" + "=" * 60)
@@ -258,7 +367,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--test_number",
         type=int,
-        default=1,
+        default=0,
         help="Which test_number to run the grid search on (default: 1)",
     )
     args = parser.parse_args()

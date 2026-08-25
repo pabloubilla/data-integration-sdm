@@ -282,7 +282,8 @@ def plot_regression_coefficients(
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--csv", type=Path, required=True, help="Path to summary_*.csv")
+    parser.add_argument("--csv", type=Path, help="Path to summary_*.csv",
+                        default='outputs/tune/test_0/summary_popa.csv')
     parser.add_argument("--out", type=Path, default=None, help="Output dir for plots (default: <csv_dir>/plots)")
     parser.add_argument("--metric", type=str, default="harmonic_mean_auc",
                          help="Metric column to use for plots 1-4 (default: harmonic_mean_auc)")

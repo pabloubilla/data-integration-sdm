@@ -16,7 +16,7 @@ import pandas as pd
 from isdm.load_data import load_geoplant_processed
 from isdm.splits import load_split_specs
 from isdm.utils import set_all_seeds
-from isdm.splits import run_one_split_pa, run_one_split_popa
+from isdm.splits import run_one_split_po_or_pa, run_one_split_popa
 
 FIXED = {"seed": 42}
 
@@ -36,7 +36,7 @@ def make_objective_pa(splits, shared_fixed):
 
         aucs = []
         for split_row in splits:
-            result = run_one_split_pa(split_row=split_row, **shared_fixed, **combo)
+            result = run_one_split_po_or_pa(split_row=split_row, **shared_fixed, **combo)
             aucs.append(result["avg_auc"])
 
         return float(np.mean(aucs))

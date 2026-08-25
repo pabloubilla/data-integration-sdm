@@ -12,7 +12,7 @@ from isdm.losses import BalancedBCELoss, BernoulliFromLogRateLoss, DeepMaxEntLos
 
 from isdm.load_data import load_geoplant_processed
 
-from isdm.splits import load_split_specs, load_split, train_po_for_splits, evaluate_model_on_all_pa_split_tests, set_all_seeds, run_one_split_pa, run_one_split_popa
+from isdm.splits import load_split_specs, load_split, train_po_for_splits, evaluate_model_on_all_pa_split_tests, set_all_seeds, run_one_split_po_or_pa, run_one_split_popa
 from isdm.evaluation import LogitsStore
 
 from dataclasses import dataclass, field
@@ -130,7 +130,7 @@ def main(dataset_name: str = "GeoPlant", split_type: str = "geographical", use_o
         #### Classic Experiment ###
         RunConfig(
             name="pa_bbce",
-            fn=run_one_split_pa,
+            fn=run_one_split_po_or_pa,
             enabled=run_pa,
             kwargs=dict(
                 batch_size=batch_size_pa, epochs=epochs_pa, lr=lr_pa,
@@ -140,7 +140,7 @@ def main(dataset_name: str = "GeoPlant", split_type: str = "geographical", use_o
         ),
         RunConfig(
             name="pa_bce",
-            fn=run_one_split_pa,
+            fn=run_one_split_po_or_pa,
             enabled=run_pa,
             kwargs=dict(
                 batch_size=batch_size_pa, epochs=epochs_pa, lr=lr_pa,

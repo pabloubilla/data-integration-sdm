@@ -28,6 +28,7 @@ def plot_splits_overview(
     covs_plot: list[str],
     output_dir: Path,
     nrows: int = 3,
+    region: str = "france"
 ):
     """
     One panel per anchor row, one column per option (closest/middle/farthest).
@@ -37,8 +38,12 @@ def plot_splits_overview(
     X_mat = X_pa[covs_plot].to_numpy()
     all_idx = np.arange(len(X_pa))
 
-    x_lim = (-5, 8.5)
-    y_lim = (42, 51.5)
+    if region == "france":
+        x_lim = (-5, 8.5)
+        y_lim = (42, 51.5)
+    elif region == "full":
+        x_lim = (-20, 40)
+        y_lim = (30, 70)
     proj = ccrs.PlateCarree()
 
     options_order = ("closest", "middle", "farthest")
@@ -132,6 +137,7 @@ def plot_validation_overview(
     specs,
     covs_plot: list[str],
     output_dir: Path,
+    region: str = "france"
 ):
     """
     Same panel layout as plot_splits_overview, but for the validation splits
@@ -142,8 +148,12 @@ def plot_validation_overview(
     X_mat = X_pa[covs_plot].to_numpy()
     all_idx = np.arange(len(X_pa))
 
-    x_lim = (-5, 8.5)
-    y_lim = (42, 51.5)
+    if region == "france":  
+        x_lim = (-5, 8.5)
+        y_lim = (42, 51.5)
+    elif region == "full":
+        x_lim = (-20, 40)
+        y_lim = (30, 70)
     proj = ccrs.PlateCarree()
 
     val_options_order = ("closest_val", "middle_val", "farthest_val")
@@ -234,12 +244,13 @@ def plot_validation_overview(
 
 
 def main(dataset_name: str = "GeoPlant",
+         region: str = "france",
          split_type: str = "geographical"):
 
     k_clusters = 200
-    data_path = f"data/processed/{dataset_name}/france"
-    # output_dir = Path(f"outputs/splits/{dataset_name}/france_gaussian_k{k_clusters}")
-    output_dir = Path(f"outputs/splits/{dataset_name}/france_bands/{split_type}")
+    data_path = f"data/processed/{dataset_name}/{region}"
+    # output_dir = Path(f"outputs/splits/{dataset_name}/{region}_gaussian_k{k_clusters}")
+    output_dir = Path(f"outputs/splits/{dataset_name}/{region}_bands/{split_type}")
 
 
     data = load_geoplant_processed(data_path, add_coordinates=True)
@@ -307,6 +318,7 @@ def main(dataset_name: str = "GeoPlant",
         specs=specs,
         covs_plot=covs_plot,
         output_dir=output_dir,
+        region=region
 )
     
     plot_validation_overview(
@@ -314,6 +326,7 @@ def main(dataset_name: str = "GeoPlant",
         specs=specs,
         covs_plot=covs_plot,
         output_dir=output_dir,
+        region=region
     )
 
     metadata = {
@@ -345,6 +358,7 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Generate Gaussian splits for GeoPlant France.")
     parser.add_argument("--dataset_name", type=str, default="GeoPlant", help="Name of the dataset (used in output dir).")
+    parser.add_argument("--region", type=str, default="france", help="Region name (used in output dir).")
     parser.add_argument("--split_type", type=str, default="geographical", help="Name of the split (used in output dir).")
     args = parser.parse_args()
 
@@ -352,4 +366,4 @@ if __name__ == "__main__":
     split_type = args.split_type
 
 
-    main(dataset_name=dataset_name, split_type=split_type)
+    main(dataset_name=dataset_name, region=args.region, split_type=split_type)

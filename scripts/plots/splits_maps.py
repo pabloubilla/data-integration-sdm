@@ -42,11 +42,11 @@ OPTION_LABEL = {
 }
 
 COLOR_MAP = {
-    "test": "#E7651F",
-    "closest": "#1E88E5",
-    "middle": "#1E88E5",
-    "farthest": "#1E88E5",
-    "po": "#9646B3",
+    "test": "#5DA4AF",
+    "closest": "#9A2094",
+    "middle": "#9A2094",
+    "farthest": "#9A2094",
+    "po": "#CC8B28",
 }
 
 LEGEND_LABEL_TEST = r"$\mathcal{D}_{\mathrm{PA}}^{\mathrm{test}}$"
@@ -90,14 +90,16 @@ def pick_example_anchors(specs: list[dict], n_examples: int) -> list[int]:
     return complete[:n_examples]
 
 
-def _new_axis(fig, gs_slot, use_cartopy: bool):
+def _new_axis(fig, gs_slot, use_cartopy: bool, projection=None):
     if use_cartopy:
-        return fig.add_subplot(gs_slot, projection=ccrs.PlateCarree())
+        return fig.add_subplot(gs_slot, projection=projection)
     return fig.add_subplot(gs_slot)
 
 
 def _style_axis(ax, x_lim, y_lim, use_cartopy: bool):
     if use_cartopy:
+        # data stays in lon/lat (PlateCarree) regardless of the axes' own
+        # display projection — this just defines the visible window
         ax.set_extent([*x_lim, *y_lim], crs=ccrs.PlateCarree())
         ax.add_feature(cfeature.OCEAN, facecolor="#dceefb", zorder=0)
         ax.add_feature(cfeature.LAND, facecolor="#f7f5f0", zorder=0)
@@ -106,7 +108,13 @@ def _style_axis(ax, x_lim, y_lim, use_cartopy: bool):
     else:
         ax.set_xlim(x_lim)
         ax.set_ylim(y_lim)
-        ax.set_aspect("equal")
+        # raw lon/lat isn't Cartesian: 1° longitude covers cos(lat) as much
+        # ground distance as 1° latitude, so a plain "equal" aspect stretches
+        # the map horizontally at mid-latitudes (e.g. France, ~46-47°N).
+        # This is the fallback-only fix; the cartopy path handles it via
+        # the LambertConformal display projection instead.
+        mean_lat = (y_lim[0] + y_lim[1]) / 2
+        ax.set_aspect(1 / np.cos(np.deg2rad(mean_lat)))
         ax.set_facecolor("#f7f5f0")
     ax.set_xticks([])
     ax.set_yticks([])
@@ -154,8 +162,11 @@ def plot_paper_splits_figure(
     their overlap is directly visible rather than one systematically
     covering the other.
 
-    X_pa / X_po: (N, 2) arrays of plotting coordinates (e.g. lon/lat),
-    aligned with the indices stored in geo_specs / env_specs.
+    X_pa / X_po: (N, 2) arrays of plotting coordinates in lon/lat degrees,
+    aligned with the indices stored in geo_specs / env_specs. All axes are
+    rendered in a proper projected CRS (LambertConformal, centered on
+    x_lim/y_lim) rather than raw PlateCarree, so France doesn't get
+    stretched horizontally by meridian convergence at this latitude.
 
     po_gap_ratio: controls the vertical gap between the PO panel and the
     PA grid below it, as a fraction of one data row's height. Larger value
@@ -168,6 +179,18 @@ def plot_paper_splits_figure(
     use_cartopy = HAS_CARTOPY
     if not use_cartopy:
         print("cartopy not available — falling back to plain scatter (no basemap).")
+
+    # Display projection for all cartopy axes: data is supplied in lon/lat
+    # (transform=PlateCarree() below) but rendered in a projected CRS
+    # centered on the region, which is what actually fixes the "too wide"
+    # distortion — PlateCarree as a *display* projection has no correction
+    # for meridian convergence at non-equatorial latitudes.
+    display_proj = None
+    if use_cartopy:
+        central_lon = float(np.mean(x_lim))
+        central_lat = float(np.mean(y_lim))
+        display_proj = ccrs.LambertConformal(central_longitude=central_lon,
+                                              central_latitude=central_lat)
 
     po_idx = np.arange(len(X_po))
     if po_sample_size is not None and len(po_idx) > po_sample_size:
@@ -205,7 +228,7 @@ def plot_paper_splits_figure(
                            height_ratios=height_ratios)
 
     # ── top panel: PO shown once, spanning the full width ──────────────
-    po_ax = _new_axis(fig, gs[0, :], use_cartopy)
+    po_ax = _new_axis(fig, gs[0, :], use_cartopy, projection=display_proj)
     _style_axis(po_ax, x_lim, y_lim, use_cartopy)
     po_kw = {"transform": ccrs.PlateCarree()} if use_cartopy else {}
     po_ax.scatter(X_po_plot[:, 0], X_po_plot[:, 1],
@@ -219,7 +242,7 @@ def plot_paper_splits_figure(
     for row in range(n_rows_data):
         for col, (block_name, by_anchor, anchors, option) in enumerate(col_defs):
             grid_col = grid_cols[col]
-            ax = _new_axis(fig, gs[row + 2, grid_col], use_cartopy)
+            ax = _new_axis(fig, gs[row + 2, grid_col], use_cartopy, projection=display_proj)
             _style_axis(ax, x_lim, y_lim, use_cartopy)
             ax_kw = {"transform": ccrs.PlateCarree()} if use_cartopy else {}
 

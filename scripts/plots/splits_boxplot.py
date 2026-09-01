@@ -371,45 +371,47 @@ if __name__ == "__main__":
     parser.add_argument("--split_type", default="geographical", type=str)
     parser.add_argument("--use_overlapping_species", action="store_true")
     parser.add_argument("--metric", default="avg_auc_species", type=str)
+    parser.add_argument("--region", default="france", type=str, help="Region to run the split sweep on (default: france).")
     parser.add_argument("--add_average", action="store_true",
                          help="Add an extra subplot showing per-run averages pooled across all options.")
     args = parser.parse_args()
     dataset_name = args.dataset_name
     split_type = args.split_type
+    region = args.region
     # spec_name = "intersect" if args.use_overlapping_species else "union"
     # for now we will set the default to intersect as the union will probably not be the one finally used
     spec_name = 'intersect'
-    output_dir = f"outputs/split_sweep/{dataset_name}/france_bands/{split_type}/{spec_name}"
-
+    output_dir = f"outputs/split_sweep/{dataset_name}/{region}_bands/{split_type}/{spec_name}"
     run_order = [
-        "po_dme",
+        "po_deep_maxent",
         "po_balanced_bce",
-        "po_bbce",
         "pa_bce",
-        "pa_bbce",
-        "po_dme_pa_dme",
-        "po_bbce_pa_bbce",
-        "po_dme_pa_bce",
-        "po_dme_pa_bbce",
-        "po_bbce_pa_bbce_wpocov",
-        "po_dme_pa_bbce_wpocov",
-        "po_dme_pa_bipp",
+        "pa_balanced_bce",
+        "po_deep_maxent_pa_deep_maxent",
+        "po_balanced_bce_pa_balanced_bce",
+        "po_deep_maxent_pa_bce",
+        "po_deep_maxent_pa_balanced_bce",
+        "po_balanced_bce_pa_balanced_bce_wpocov",
+        "po_deep_maxent_pa_balanced_bce_wpocov",
+        "po_deep_maxent_pa_balanced_bce_ippp",
 
     ]
 
+    
+
     run_name_map = {
-        "po_dme":          "PO DeepMaxent",
-        "po_bbce":         "PO Bal. BCE",
+        "po_deep_maxent":          "PO DeepMaxent",
+        "po_balanced_bce":         "PO Bal. BCE",
         "pa_bce":          "PA BCE",
-        "pa_bbce":         "PA Bal. BCE",
+        "pa_balanced_bce":         "PA Bal. BCE",
         "po_balanced_bce": "PO Balanced BCE",
-        "po_dme_pa_bipp":  "PO DeepMaxent + PA Bal. IPP",
-        "po_dme_pa_bce":   "PO DeepMaxent + PA BCE",
-        "po_dme_pa_dme":   "PO DeepMaxent + PA DeepMaxent",
-        "po_dme_pa_bbce":  "PO DeepMaxent + PA Bal. BCE",
-        "po_bbce_pa_bbce": "PO Bal. BCE + PA Bal. BCE",
-        "po_bbce_pa_bbce_wpocov": "PO Bal. BCE + PA Bal. BCE (w_po_cov)",
-        "po_dme_pa_bbce_wpocov": "PO DeepMaxent + PA Bal. BCE (w_po_cov)"
+        "po_deep_maxent_pa_balanced_bce_ippp":  "PO DeepMaxent + PA Bal. IPP",
+        "po_deep_maxent_pa_bce":   "PO DeepMaxent + PA BCE",
+        "po_deep_maxent_pa_deep_maxent":   "PO DeepMaxent + PA DeepMaxent",
+        "po_deep_maxent_pa_balanced_bce":  "PO DeepMaxent + PA Bal. BCE",
+        "po_balanced_bce_pa_balanced_bce": "PO Bal. BCE + PA Bal. BCE",
+        "po_balanced_bce_pa_balanced_bce_wpocov": "PO Bal. BCE + PA Bal. BCE (w_po_cov)",
+        "po_deep_maxent_pa_balanced_bce_wpocov": "PO DeepMaxent + PA Bal. BCE (w_po_cov)"
 
     }
 

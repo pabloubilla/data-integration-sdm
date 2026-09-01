@@ -1,7 +1,7 @@
 #!/bin/bash
 #OAR -q abaca
 # #OAR -t besteffort
-#OAR -l host=1/gpu=1,walltime=12:00:00
+#OAR -l host=1/gpu=1,walltime=24:00:00
 #OAR -p cluster IN ('esterel23','esterel24','esterel28','esterel30','esterel41')
 # #OAR -p esterel41
 #OAR -O jobs/OAR_%jobid%.out
@@ -38,7 +38,9 @@ echo
 
 # /home/pubillap/.conda/envs/eco/bin/python -u scripts/run_split_sweep.py --dataset_name GeoPlant 
 # /home/pubillap/.conda/envs/eco/bin/python -u scripts/run_integration_experiment.py 
-/home/pubillap/.conda/envs/eco/bin/python -u scripts/tune_split.py 
+/home/pubillap/.conda/envs/eco/bin/python -u scripts/tune_split.py --split_type environmental
+
+/home/pubillap/.conda/envs/eco/bin/python -u scripts/run_split_sweep.py --split_type environmental --use_overlapping_species
 
 # -c 'import torch; print("Test run");print("cuda available:", torch.cuda.is_available()); print("device:", torch.cuda.get_device_name(0) if torch.cuda.is_available() else "none")'
 echo

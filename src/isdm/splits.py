@@ -362,14 +362,14 @@ def subset_list(xs, idx):
     return [xs[int(i)] for i in idx]
 
 
-def make_loader(X, y_lists, num_classes: int, batch_size: int, shuffle: bool):
+def make_loader(X, y_lists, num_classes: int, batch_size: int, shuffle: bool, num_workers: int = 0):
     ds = MultiLabelDataset(X, y_lists)
 
     return DataLoader(
         ds,
         batch_size=batch_size,
         shuffle=shuffle,
-        num_workers=4,
+        num_workers=num_workers,
         pin_memory=torch.cuda.is_available(),
         collate_fn=partial(collate_multilabel, num_classes=num_classes),
     )

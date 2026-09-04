@@ -27,7 +27,7 @@ def plot_splits_overview(
     specs,
     covs_plot: list[str],
     output_dir: Path,
-    nrows: int = 3,
+    nrows: int = 8,
     region: str = "france"
 ):
     """

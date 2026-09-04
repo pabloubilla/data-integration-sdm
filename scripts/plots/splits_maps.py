@@ -30,6 +30,7 @@ try:
 except ImportError:
     HAS_CARTOPY = False
 
+from matplotlib.lines import Line2D
 
 OPTIONS_ORDER = ("test", "closest", "middle", "farthest")
 
@@ -78,7 +79,7 @@ def load_saved_specs(split_dir: str | Path) -> list[dict]:
     return specs
 
 
-def pick_example_anchors(specs: list[dict], n_examples: int) -> list[int]:
+def pick_example_anchors(specs: list[dict], example_list = [0]) -> list[int]:
     """Picks the first n_examples anchors (by test_number) that have all
     three plain options (closest/middle/farthest) available."""
     by_anchor: dict[int, set[str]] = {}
@@ -87,7 +88,7 @@ def pick_example_anchors(specs: list[dict], n_examples: int) -> list[int]:
             by_anchor.setdefault(s["test_number"], set()).add(s["option"])
 
     complete = sorted(k for k, opts in by_anchor.items() if len(opts) == 3)
-    return complete[:n_examples]
+    return [complete[i] for i in example_list]
 
 
 def _new_axis(fig, gs_slot, use_cartopy: bool, projection=None):
@@ -142,39 +143,20 @@ def plot_paper_splits_figure(
     X_po: np.ndarray,
     geo_specs: list[dict],
     env_specs: list[dict],
-    n_splits: int = 1,
+    geo_split_list = [0],
+    env_split_list = [0],
     x_lim: tuple[float, float] = (-5, 8.5),
     y_lim: tuple[float, float] = (42, 51.5),
     output_path: str | Path = "paper_splits_figure.png",
     po_sample_size: int | None = None,
     rng_seed: int = 0,
-    po_gap_ratio: float = 0.6,
-    legend_y: float = 0.1,
-    legend_gap = 0.05
+    po_gap_ratio: float = .4,
+    po_width_ratio = 1.5
 ):
     """
-    Builds a figure with one dedicated top panel showing D_PO alone (a
-    single, constant dataset, shown once), followed by a grid with 6
-    columns — (Geographical: close, medium, far) then
-    (Environmental: close, medium, far) — and one row per split example
-    (n_splits controls how many). Every panel overlays both the train band
-    and the fixed test set as a single, randomly-interleaved scatter, so
-    their overlap is directly visible rather than one systematically
-    covering the other.
+    Plots a figure comparing example geographical and environmental splits,
+    PO is kept constant on the left
 
-    X_pa / X_po: (N, 2) arrays of plotting coordinates in lon/lat degrees,
-    aligned with the indices stored in geo_specs / env_specs. All axes are
-    rendered in a proper projected CRS (LambertConformal, centered on
-    x_lim/y_lim) rather than raw PlateCarree, so France doesn't get
-    stretched horizontally by meridian convergence at this latitude.
-
-    po_gap_ratio: controls the vertical gap between the PO panel and the
-    PA grid below it, as a fraction of one data row's height. Larger value
-    = more space between them.
-    legend_y: figure-fraction y-position of the legend (0 = bottom edge of
-    the figure, 1 = top). The bottom margin is automatically widened to
-    fit, so increasing this both moves the legend up and adds more space
-    below the PA grid.
     """
     use_cartopy = HAS_CARTOPY
     if not use_cartopy:
@@ -200,62 +182,58 @@ def plot_paper_splits_figure(
 
     geo_by_anchor = _group_by_anchor(geo_specs)
     env_by_anchor = _group_by_anchor(env_specs)
-    geo_anchors = pick_example_anchors(geo_specs, n_splits)
-    env_anchors = pick_example_anchors(env_specs, n_splits)
+    geo_anchors = pick_example_anchors(geo_specs, geo_split_list)
+    env_anchors = pick_example_anchors(env_specs, env_split_list)
 
     n_rows_data = max(len(geo_anchors), len(env_anchors))
-    if n_rows_data < n_splits:
-        print(f"Only {n_rows_data} complete anchors available (requested n_splits={n_splits}).")
+    # if n_rows_data < n_splits:
+    #     print(f"Only {n_rows_data} complete anchors available (requested n_splits={n_splits}).")
 
     col_defs = [("Geographical", geo_by_anchor, geo_anchors, opt) for opt in BAND_OPTIONS]
     col_defs += [("Environmental", env_by_anchor, env_anchors, opt) for opt in BAND_OPTIONS]
 
     # narrow spacer column between the two 3-column blocks so they read as
     # visually distinct groups; grid_cols maps col_defs index -> gridspec column
-    grid_cols = [0, 1, 2, 4, 5, 6]
-    width_ratios = [1, 1, 1, 0.2, 1, 1, 1]
+    grid_cols = [2, 3, 4, 6, 7, 8]
+    width_ratios = [po_width_ratio, po_gap_ratio, 1, 1, 1, 0.2, 1, 1, 1]
     ncols_grid = len(width_ratios)
 
-    # spacer ROW between the PO panel and the PA grid, same trick as the
-    # column spacer above: no axis is placed there, it just reserves
-    # vertical space, controlled directly by po_gap_ratio
-    height_ratios = [1.1, po_gap_ratio] + [1] * n_rows_data
+
+    height_ratios = [1] * n_rows_data
     nrows_grid = len(height_ratios)
 
-    fig = plt.figure(figsize=(2.1 * len(col_defs) + 1, 2.2 * (n_rows_data + 1)))
-    gs = fig.add_gridspec(nrows_grid, ncols_grid, wspace=0.05, hspace=0.01,
-                           width_ratios=width_ratios,
-                           height_ratios=height_ratios)
+    fig = plt.figure(figsize=(2.1 * len(col_defs) + 3, 1.7 * n_rows_data))
+    gs = fig.add_gridspec(nrows_grid, ncols_grid, wspace=0.05, hspace=0.09,
+                           width_ratios=width_ratios, height_ratios=height_ratios)
 
-    # ── top panel: PO shown once, spanning the full width ──────────────
-    po_ax = _new_axis(fig, gs[0, :], use_cartopy, projection=display_proj)
+
+    # ── left panel: PO shown once, spanning the full height ────────────
+    po_ax = _new_axis(fig, gs[:, 0], use_cartopy, projection=display_proj)
     _style_axis(po_ax, x_lim, y_lim, use_cartopy)
     po_kw = {"transform": ccrs.PlateCarree()} if use_cartopy else {}
     po_ax.scatter(X_po_plot[:, 0], X_po_plot[:, 1],
-                  c=COLOR_MAP["po"], s=.5, alpha=0.3, linewidths=0, zorder=1, **po_kw)
-    po_ax.set_title(LEGEND_LABEL_PO + " (kept constant across all splits)", fontsize=11)
+                  c=COLOR_MAP["po"], s=.05, alpha=0.3, linewidths=0, zorder=1, **po_kw)
+    # title above reads awkwardly on a tall narrow panel — put it as an
+    # ylabel-style rotated text instead, or keep as a wrapped title
+    # po_ax.set_title(LEGEND_LABEL_PO + "\n(constant across\nall splits)", fontsize=10)
+
 
     # ── grid: rows = split examples, columns = (block, band) pairs ─────
-    # row offset of 2 accounts for the PO row (index 0) and the spacer
-    # row (index 1) inserted above
-    top_row_axes: dict[int, plt.Axes] = {}
+    top_row_axes = {}
     for row in range(n_rows_data):
         for col, (block_name, by_anchor, anchors, option) in enumerate(col_defs):
             grid_col = grid_cols[col]
-            ax = _new_axis(fig, gs[row + 2, grid_col], use_cartopy, projection=display_proj)
+            ax = _new_axis(fig, gs[row, grid_col], use_cartopy, projection=display_proj)
             _style_axis(ax, x_lim, y_lim, use_cartopy)
             ax_kw = {"transform": ccrs.PlateCarree()} if use_cartopy else {}
 
             if row < len(anchors):
                 anchor_ix = anchors[row]
                 option_specs = by_anchor[anchor_ix]
-                test_idx = option_specs["closest"]["test_idx"]  # shared across options
+                test_idx = option_specs["closest"]["test_idx"]
                 spec = option_specs.get(option)
                 train_idx = spec["train_idx"] if spec is not None else np.array([], dtype=np.int64)
 
-                # combine train + test into ONE scatter call, drawn in
-                # random order, so overlap is genuinely interleaved rather
-                # than one color systematically covering the other
                 combined_idx = np.concatenate([train_idx, test_idx])
                 combined_colors = np.array(
                     [COLOR_MAP[option]] * len(train_idx) + [COLOR_MAP["test"]] * len(test_idx)
@@ -267,15 +245,15 @@ def plot_paper_splits_figure(
                            c=combined_colors[perm], s=8, linewidths=0, zorder=2, **ax_kw)
 
             if row == 0:
-                ax.set_title(BAND_LABEL[option], fontsize=10)
+                ax.set_title(BAND_LABEL[option], fontsize=13)
                 top_row_axes[col] = ax
             if col == 0:
                 ax.text(-0.05, 0.5, f"$k={row+1}$", transform=ax.transAxes,
-                        rotation=90, va="center", ha="center", fontsize=11)
+                        rotation=90, va="center", ha="center", fontsize=13)
+
 
     # shared legend — bbox_to_anchor gives direct control over its
     # vertical position, independent of tight_layout's own margins
-    from matplotlib.lines import Line2D
     legend_elems = [
         Line2D([0], [0], marker="o", color="w", markerfacecolor=COLOR_MAP["po"],
                markersize=10, label=LEGEND_LABEL_PO),
@@ -284,26 +262,23 @@ def plot_paper_splits_figure(
         Line2D([0], [0], marker="o", color="w", markerfacecolor=COLOR_MAP["closest"],
                markersize=10, label=LEGEND_LABEL_TRAIN),
     ]
-    fig.legend(handles=legend_elems, loc="lower center", bbox_to_anchor=(0.5, legend_y),
-               ncol=3, fontsize=9, frameon=True)
+    fig.legend(handles=legend_elems, loc="center right", bbox_to_anchor=(0.98, 0.5),
+           ncol=1, fontsize=13, frameon=True)
+    fig.subplots_adjust(left=0.05, right=0.88, top=0.92, bottom=0.05)
 
-    # plt.tight_layout(rect=[0.03, legend_y, 1, 0.98])
-    fig.subplots_adjust(left=0.03, right=1.0, top=0.98, bottom=legend_y + legend_gap)
-
-    # group-level super-titles ("Geographical" / "Environmental"), spanning
-    # each 3-column block; computed from the top data row's axis positions
-    # so they line up correctly regardless of figure size / column widths
     for block_name, cols in (("Geographical", [0, 1, 2]), ("Environmental", [3, 4, 5])):
         lefts = [top_row_axes[c].get_position().x0 for c in cols]
         rights = [top_row_axes[c].get_position().x1 for c in cols]
         top = max(top_row_axes[c].get_position().y1 for c in cols)
         mid_x = (min(lefts) + max(rights)) / 2
-        fig.text(mid_x, top + 0.03, block_name, ha="center", va="bottom",
+        fig.text(mid_x, top + 0.07, block_name, ha="center", va="bottom",
                   fontsize=13, fontweight="bold")
+
 
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    plt.savefig(output_path, dpi=300, bbox_inches="tight")
+    plt.savefig(output_path, dpi=300, bbox_inches="tight", pad_inches=0.1)
+    plt.show()
     plt.close()
     print(f"Saved figure to {output_path}")
 
@@ -317,13 +292,7 @@ def main():
     parser.add_argument("--env_split_dir", type=Path,
                          default=Path("outputs/splits/GeoPlant/france_bands/environmental"))
     parser.add_argument("--data_path", type=str, default="data/processed/GeoPlant/france")
-    parser.add_argument("--n_splits", type=int, default=3,
-                         help="Number of split examples (anchors) to show, one per row.")
     parser.add_argument("--output", type=Path, default=Path("outputs/figures/splits_maps.png"))
-    parser.add_argument("--po_gap_ratio", type=float, default=0.15,
-                         help="Vertical gap between the PO panel and the PA grid.")
-    parser.add_argument("--legend_y", type=float, default=0.02,
-                         help="Figure-fraction y-position of the legend.")
     args = parser.parse_args()
 
     data = load_geoplant_processed(args.data_path, add_coordinates=True)
@@ -340,10 +309,11 @@ def main():
         X_po=X_po,
         geo_specs=geo_specs,
         env_specs=env_specs,
-        n_splits=args.n_splits,
         output_path=args.output,
-        po_gap_ratio=args.po_gap_ratio,
-        legend_y=args.legend_y,
+        ### Splits chosen to be schematic
+        # Note that the order is arbitrary (for intance there is nothing particular about k=1 or k=7)
+        geo_split_list=[0,1,2],
+        env_split_list=[2,0,6]
     )
 
 

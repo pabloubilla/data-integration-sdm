@@ -22,11 +22,7 @@ class DeepMaxEntLoss(nn.Module):
     DeepMaxEnt loss (Ryckewaert), reduced as a mean over species present
     in the batch:
 
-        L = -(1/|K_B|) * sum_{j in K_B} sum_i (y_ij / n_j) * log_softmax(input)_ij
-
-    where n_j = sum_b y_bj and K_B = {j : n_j > 0}. This keeps the loss
-    scale invariant to the number of species, whether present or absent
-    in a given batch, matching the normalization used by BalancedBCELoss.
+        L = -(1/|S_B|) * sum_{j in S_B} sum_i (y_ij / n_j) * log_softmax(input)_ij
     """
 
     def forward(self, input: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
@@ -264,5 +260,6 @@ LOSS_REGISTRY = {
     "bernoulli_from_log_rate": BernoulliFromLogRateLoss,
     "poisson_log_rate": PoissonLogRateLoss,
     "abn": ABNLoss,
-    "bce": BCEWithLogitsLoss
+    "bce": BCEWithLogitsLoss,
+    "bce_ippp": functools.partial(BernoulliFromLogRateLoss, balance_pos=False),
 }

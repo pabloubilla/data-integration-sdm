@@ -34,8 +34,7 @@ class MLP(nn.Module):
         })
 
         # --- head (output layer) ---
-        # keep bias=False like your original
-        self.output_layer = nn.Linear(hidden_size, output_size, bias=False)
+        self.output_layer = nn.Linear(hidden_size, output_size, bias=True) # Bias could be relevant or not depending on the Loss Function
 
 
     def get_features(self, x: torch.Tensor) -> torch.Tensor:

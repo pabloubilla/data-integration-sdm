@@ -1,6 +1,7 @@
 data/
 data.zip
 output/
+outputs_/
 quarto/
 presentation/
 myenv/
@@ -16,10 +17,12 @@ bias_map_PO
 .Rproj.user
 outputs/
 .RData
-<<<<<<< HEAD
-=======
-old_outputs/
-misc/
-jobs/
->>>>>>> cluster-snapshot
 .DS_Store
+outputs_old_08092026/
+jobs/
+misc/
+logs/
+outputs_20260908/
+outputs_20260910/
+test/
+shell_scripts/

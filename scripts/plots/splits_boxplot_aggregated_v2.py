@@ -10,6 +10,12 @@ import matplotlib.patheffects as pe
 
 CATEGORY_ORDER = ["PO only", "PA only", "PO + PA"]
 
+SOURCE_REMAP = {
+    "po": "PO only",
+    "pa": "PA only",
+    "popa": "PO + PA"
+}
+
 CATEGORY_NAME_MAP = {
     "PO only": "Loss for PO data\n(single-source)",
     "PA only": "Loss for PA data\n(single-source)",
@@ -728,7 +734,7 @@ def plot_winning_methods_by_distance(
     plt.show()
 
 
-def plot_winning_methods_by_distance_v2(
+def plot_winning_methods_by_distance_v2_old(
     row_configs: list,                  # [{"path": ..., "metric": ..., "row_title": ...}, ...] — one row per metric
     winner_runs: dict,                  # {"PO only": run_name, "PA only": run_name, "PO + PA": run_name}
     run_name_map: dict | None = None,
@@ -885,6 +891,188 @@ def plot_winning_methods_by_distance_v2(
         )
     for ax in axes[:, 1]:
         ax.set_yticks(yticks)  # keeps gridlines aligned; labels stay hidden (labelleft=False above)
+
+    plt.tight_layout(rect=[0, 0.08, 1, 1])
+    fig.legend(handles=legend_handles, loc="lower center", ncol=len(present_cats),
+               bbox_to_anchor=(0.5, 0.0), fontsize=8.5, frameon=False)
+
+    plt.savefig(out_path, dpi=350, bbox_inches="tight")
+    out_svg = os.path.splitext(out_path)[0] + ".svg"
+    plt.savefig(out_svg, bbox_inches="tight", facecolor="none")
+    print(f"[winners-by-distance] Saved → {out_path}")
+    plt.show()
+
+def plot_winning_methods_by_distance_v2(
+    row_configs: list,                  # [{"path": ..., "metric": ..., "row_title": ...}, ...] — one row per metric
+    winner_runs: dict,                  # {"PO only": run_name, "PA only": run_name, "PO + PA": run_name}
+    run_name_map: dict | None = None,
+    box_width: float = 0.5,
+    within_group_gap: float = 0.0,     # gap between PA/Integrated boxes sitting at the same distance
+    between_group_gap: float = 0.2,    # gap between close/mid/far clusters, and between avg-panel boxes
+    metric_map: dict | None = None,
+    options=("closest", "middle", "farthest"),
+    single_box_categories=("PO only",),  # categories left OUT of the by-distance panel (no distance variation)
+    ymin: float = 0.55,
+    out_path: str = "winning_methods_by_distance.png",
+    derived_metrics: dict | None = None,
+):
+    """
+    Three panels per row (one row per metric):
+      - LEFT ('by distance'): x ticks are close/mid/far; at each tick, PA
+        and Integrated are drawn side by side so those two — the ones that
+        actually vary by distance — are easy to compare directly.
+      - MIDDLE ('averaged'): one box per non-single-box category (PA,
+        Integrated), each pooling every distance's rows together.
+      - RIGHT ('PO'): a single box per single-box category (PO only),
+        which has no distance variation to begin with.
+
+    Deliberately simple styling: solid color per category (no gradient, no
+    hatch), a plain legend, and horizontal reference gridlines with every
+    other y-tick labeled (every 0.1) for easier row-to-row comparison.
+    """
+    if not row_configs:
+        raise ValueError("row_configs must contain at least one entry")
+
+    present_cats = [c for c in CATEGORY_ORDER if c in winner_runs]
+    dist_cats = [c for c in present_cats if c not in single_box_categories]
+    po_cats = [c for c in present_cats if c in single_box_categories]
+    short_label = {"PO only": "PO", "PA only": "PA", "PO + PA": "PO & PA"}
+    distance_short_label = {"closest": "close", "middle": "medium", "farthest": "far"}
+    n_rows = len(row_configs)
+
+    dfs = {rc["path"]: _load_with_derived_metrics(rc["path"], derived_metrics) for rc in row_configs}
+
+    # one solid color per category — no gradient, no hatch
+    cat_colors = {cat: plt.get_cmap(CATEGORY_CMAPS.get(cat, "Greys"))(0.75) for cat in present_cats}
+
+    # --- LEFT panel positions: one close/mid/far cluster, each holding a
+    # box per dist_cats (PA, Integrated), packed tight ---
+    dist_positions_by_cat = {cat: [] for cat in dist_cats}
+    dist_tick_positions, dist_tick_labels = [], []
+    x = 0.0
+    for opt in options:
+        cluster_positions = [x + i * (box_width + within_group_gap) for i in range(len(dist_cats))]
+        for cat, pos in zip(dist_cats, cluster_positions):
+            dist_positions_by_cat[cat].append(pos)
+        dist_tick_positions.append(float(np.mean(cluster_positions)))
+        dist_tick_labels.append(distance_short_label.get(opt, opt))
+        x = cluster_positions[-1] + box_width + between_group_gap
+    dist_xmin = dist_positions_by_cat[dist_cats[0]][0] - box_width
+    dist_xmax = dist_positions_by_cat[dist_cats[-1]][-1] + box_width
+
+    # --- MIDDLE panel positions: one box per dist_cat (PA, Integrated), pooled ---
+    avg_x = np.arange(len(dist_cats)) * (box_width + within_group_gap)
+    avg_positions = dict(zip(dist_cats, avg_x))
+    avg_box_positions = list(avg_positions.values())
+    avg_xmin = avg_box_positions[0] - box_width
+    avg_xmax = avg_box_positions[-1] + box_width
+    # single centered tick reading "Average" instead of one label per box
+    avg_tick_positions = [float(np.mean(avg_box_positions))]
+    avg_tick_labels = ["Avg. over distance"]
+
+    # --- RIGHT panel positions: one box per single-box category (PO only) ---
+    po_x = np.arange(len(po_cats)) * (box_width + within_group_gap)
+    po_positions = dict(zip(po_cats, po_x))
+    po_tick_positions = list(po_positions.values())
+    # po_tick_labels = [short_label.get(cat, cat) for cat in po_cats]
+    po_xmin = po_tick_positions[0] - box_width
+    po_xmax = po_tick_positions[-1] + box_width
+
+    # column widths proportional to how many boxes each panel actually draws
+    dist_span = dist_xmax - dist_xmin
+    avg_span = avg_xmax - avg_xmin
+    po_span = po_xmax - po_xmin
+    fig, axes = plt.subplots(
+        n_rows, 3, figsize=(0.9 * (dist_span + avg_span + po_span) + 1, 2.6 * n_rows),
+        squeeze=False, sharex="col", sharey="row",
+        gridspec_kw={"width_ratios": [dist_span, avg_span, po_span], "wspace": 0.08},
+    )
+
+    def _draw_box(ax, data, position, color):
+        bp = ax.boxplot(
+            [data], positions=[position], widths=box_width, patch_artist=True,
+            medianprops=dict(color="black", linewidth=1),
+            whiskerprops=dict(linewidth=0.9, color="#555"),
+            capprops=dict(linewidth=0.9, color="#555"),
+            flierprops=dict(marker=".", markersize=3, alpha=0.4, color="#888"),
+            boxprops=dict(linewidth=0.8), manage_ticks=False,
+        )
+        for patch in bp["boxes"]:
+            patch.set_facecolor(color)
+            patch.set_alpha(0.85)
+
+    for row_i, rc in enumerate(row_configs):
+        ax_dist, ax_avg, ax_po = axes[row_i]
+        df = dfs[rc["path"]]
+
+        metric = rc["metric"]
+
+        # LEFT: PA / Integrated, split by distance
+        for cat in dist_cats:
+            run = winner_runs[cat]
+            for pos, opt in zip(dist_positions_by_cat[cat], options):
+                data = df[(df["run"] == run) & (df["option"] == opt)][metric].values
+                _draw_box(ax_dist, data, pos, cat_colors[cat])
+
+        # MIDDLE: PA / Integrated, each pooled across every distance
+        for cat in dist_cats:
+            run = winner_runs[cat]
+            data = df[df["run"] == run].groupby("test_number")[metric].mean().values  # average across distances
+            _draw_box(ax_avg, data, avg_positions[cat], cat_colors[cat])
+
+        # RIGHT: PO only, pooled (no distance variation to begin with)
+        for cat in po_cats:
+            run = winner_runs[cat]
+            data = df[df["run"] == run].groupby("test_number")[metric].mean().values
+            _draw_box(ax_po, data, po_positions[cat], cat_colors[cat])
+
+        ax_dist.set_xlim(dist_xmin, dist_xmax)
+        ax_avg.set_xlim(avg_xmin, avg_xmax)
+        ax_po.set_xlim(po_xmin, po_xmax)
+        for ax in (ax_dist, ax_avg, ax_po):
+            ax.set_ylim(ymin, 1)
+            ax.spines[["top", "right"]].set_visible(False)
+
+        ylabel = metric_map.get(metric, metric) if metric_map else metric
+        ax_dist.set_ylabel(ylabel, fontsize=10)
+
+    axes[-1, 0].set_xticks(dist_tick_positions)
+    axes[-1, 0].set_xticklabels(dist_tick_labels, fontsize=9)
+    axes[-1, 0].tick_params(axis="x", length=0)
+    axes[-1, 1].set_xticks(avg_tick_positions)
+    axes[-1, 1].set_xticklabels(avg_tick_labels, fontsize=9)
+    axes[-1, 1].tick_params(axis="x", length=0)
+    axes[-1, 2].set_xticks(po_tick_positions)
+    axes[-1, 2].set_xticklabels([""], fontsize=9)
+    axes[-1, 2].tick_params(axis="x", length=0)
+
+    # simple legend: one patch per category, labelled with the actual
+    # winning run so it doubles as "which run is this color"
+    legend_handles = [
+        mpatches.Patch(
+            facecolor=cat_colors[cat], alpha=0.85,
+            label=f"{short_label.get(cat, cat)}: "
+                  f"{run_name_map.get(winner_runs[cat], winner_runs[cat]) if run_name_map else winner_runs[cat]}",
+        )
+        for cat in present_cats
+    ]
+
+    # horizontal reference gridlines behind the boxes, all panels
+    for ax in axes.ravel():
+        ax.yaxis.grid(True, linestyle="--", linewidth=0.5, alpha=0.6, zorder=0)
+        ax.set_axisbelow(True)
+
+    # y-ticks every 0.05, numeric label only every 0.1 (float-safe check —
+    # `% 0.1 == 0` fails for arange floats due to precision, see np.isclose)
+    yticks = np.arange(ymin, 1.01, 0.05)
+    for ax in axes[:, 0]:
+        ax.set_yticks(yticks)
+        ax.set_yticklabels(
+            [f"{y:.2f}" if np.isclose(y * 10, np.round(y * 10)) else "" for y in yticks],
+            fontsize=8,
+        )
+    for ax in axes[:, 1:].ravel():
+        ax.set_yticks(yticks)  # keeps gridlines aligned; labels stay hidden
 
     plt.tight_layout(rect=[0, 0.08, 1, 1])
     fig.legend(handles=legend_handles, loc="lower center", ncol=len(present_cats),
@@ -1111,15 +1299,18 @@ if __name__ == "__main__":
     run_order = [
         "po_deep_maxent",
         "po_balanced_bce",
+        "po_bce",
         "pa_bce",
         "pa_balanced_bce",
         "po_deep_maxent_pa_deep_maxent",
         "po_balanced_bce_pa_balanced_bce",
+        "po_bce_pa_bce",
         "po_deep_maxent_pa_bce",
+        "po_deep_maxent_pa_bce_ippp",
         "po_deep_maxent_pa_balanced_bce",
-        "po_balanced_bce_pa_balanced_bce_wpocov",
-        "po_deep_maxent_pa_balanced_bce_wpocov",
         "po_deep_maxent_pa_balanced_bce_ippp",
+        # "po_balanced_bce_pa_balanced_bce_wpocov",
+        # "po_deep_maxent_pa_balanced_bce_wpocov",
     ]
 
     # run_order = [
@@ -1129,19 +1320,48 @@ if __name__ == "__main__":
     # ]
 
 
-    run_name_map = {
-        "po_deep_maxent":          "DeepMaxent",
-        "po_balanced_bce":         "Bal. BCE",
-        "pa_bce":                  "BCE",
-        "pa_balanced_bce":         "Bal. BCE",
-        "po_deep_maxent_pa_deep_maxent":          "DeepMaxent (both)",
-        "po_balanced_bce_pa_balanced_bce":        "Bal. BCE (both)",
-        "po_deep_maxent_pa_bce":                  "DeepMaxent + BCE",
-        "po_deep_maxent_pa_balanced_bce":         "DeepMaxent + Bal. BCE (Sigmoid)",
-        "po_balanced_bce_pa_balanced_bce_wpocov": "Bal. BCE (both, w/ PO cov)",
-        "po_deep_maxent_pa_balanced_bce_wpocov":  "DeepMaxent + Bal. BCE (w/ PO cov)",
-        "po_deep_maxent_pa_balanced_bce_ippp":    "DeepMaxent + Bal. BCE (IPP)",
+    METHOD_LABELS = {
+        "deep_maxent": "DeepMaxent",
+        "balanced_bce": "Bal. BCE",
+        "bce": "BCE",
     }
+
+    SUFFIX_LABELS = {
+        "ippp": "IPP",
+        "wpocov": "w/ PO cov",
+    }
+
+    def make_run_name(run_key: str) -> str:
+        # peel off a known suffix, if present
+        suffix = None
+        for suf in SUFFIX_LABELS:
+            if run_key.endswith(f"_{suf}"):
+                suffix = suf
+                run_key = run_key[: -(len(suf) + 1)]
+                break
+
+        if "_pa_" in run_key:
+            po_part, pa_method = run_key.split("_pa_", 1)
+            po_method = po_part.removeprefix("po_")
+
+            po_label = METHOD_LABELS[po_method]
+            pa_label = METHOD_LABELS[pa_method]
+
+            if po_method == pa_method:
+                label = f"{po_label} (both"
+                if suffix:
+                    label += f", {SUFFIX_LABELS[suffix]}"
+                return label + ")"
+
+            suffix_label = SUFFIX_LABELS[suffix] if suffix else "Sigmoid"
+            return f"{po_label} + {pa_label} ({suffix_label})"
+
+        # PO-only or PA-only run
+        method = run_key.removeprefix("po_").removeprefix("pa_")
+        return METHOD_LABELS[method]
+
+
+    run_name_map = {k: make_run_name(k) for k in run_order}
 
     # Example: give the "w_po_cov" variants a hatch so they stand out even
     # though they share a color family with their non-wpocov siblings.
@@ -1155,11 +1375,11 @@ if __name__ == "__main__":
         "avg_auc_site": "Average AUC-site",
     }
 
-    winner_runs = {
-        "PO only": "po_balanced_bce",
-        "PA only": "pa_balanced_bce",
-        "PO + PA": "po_deep_maxent_pa_balanced_bce_ippp",
-    } 
+    # winner_runs = {
+    #     "PO only": "po_balanced_bce",
+    #     "PA only": "pa_balanced_bce",
+    #     "PO + PA": "po_deep_maxent_pa_balanced_bce_ippp",
+    # } 
 
     # Harmonic-mean row: combines the two AUC metrics into a single score
     # that penalizes runs which do well on one but poorly on the other.
@@ -1173,6 +1393,23 @@ if __name__ == "__main__":
         "avg_auc_site": "AUC\nsite",
         HARMONIC_COL: "H(AUC)",
     }
+
+    winner_runs = {}  # will be filled in below
+    # determine best run per split_type
+    for split_type in split_types:
+        print(f"Finding best runs for split type: {split_type}")
+        winner_runs[split_type] = {}
+        df = pd.read_csv(os.path.join(output_dir_for(split_type), "summary_common.csv"))
+        df['source'] = df['source'].map(SOURCE_REMAP)
+        df[HARMONIC_COL] = _harmonic_mean(df["avg_auc_species"], df["avg_auc_site"])
+        for source in ["PO only", "PA only", "PO + PA"]:
+            source_df = df[df['source'] == source]
+            # average the harmonic mean across all options for each run
+            source_df = source_df.groupby('run')[HARMONIC_COL].mean().reset_index()
+            best_run = source_df.loc[source_df[HARMONIC_COL].idxmax()]['run']
+            winner_runs[split_type][source] = best_run
+    print(f"Winner runs by source: {winner_runs}")
+
 
     if args.single:
         # Original behaviour: one (split_type, metric) combo per call.
@@ -1203,7 +1440,8 @@ if __name__ == "__main__":
                     }
                     for metric in row_metrics
                 ]
-                out_path = f"outputs/split_sweep/{dataset_name}/{region}_bands/{split_type}/combined_metrics_boxplots.png"
+                
+                out_path = f"{output_dir_for(split_type)}/plots/combined_metrics_boxplots.png"
                 os.makedirs(os.path.dirname(out_path), exist_ok=True)
                 plot_auc_boxplots_grid(
                     row_configs,
@@ -1230,10 +1468,9 @@ if __name__ == "__main__":
                     }
                     for metric in row_metrics
                 ]
-                out_path = (f"outputs/split_sweep/{dataset_name}/{region}_bands/{split_type}/"
-                            f"winning_methods_grid_{split_type}.png")
+                out_path = (f"{output_dir_for(split_type)}/plots/winning_methods_grid_{split_type}.png")    
                 os.makedirs(os.path.dirname(out_path), exist_ok=True)
-                plot_winning_methods_by_distance_v2(row_configs, winner_runs, run_name_map=run_name_map,
+                plot_winning_methods_by_distance_v2(row_configs, winner_runs[split_type], run_name_map=run_name_map,
                                   metric_map=metric_map, derived_metrics=derived_metrics,
                                   out_path=out_path)
 

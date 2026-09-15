@@ -226,7 +226,7 @@ def partition_sweep_bands(
     distance_metric: DistanceMetric = "mahalanobis",
     seed: int = 42,
     options: tuple[SplitOption, ...] = ("closest", "middle", "farthest"),
-    plot: bool = True,
+    plot: bool = False,
     reserve_validation: bool = True,
     val_proportion: float = 0.1,
 ) -> list[SplitSpec]:

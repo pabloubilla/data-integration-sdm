@@ -113,6 +113,36 @@ def _load_france_polygon(exclude_corsica: bool = True):
 
     return unary_union(mainland_parts)
 
+def _load_country(country_name: str, output_plot_path: Optional[str] = None):
+    """
+    Load the specified country boundary as a single (multi)polygon.
+    Cached so the shapefile is only read once per process.
+    """
+
+    url = "https://naturalearth.s3.amazonaws.com/10m_cultural/ne_10m_admin_0_countries.zip"
+    world = gpd.read_file(url)
+    country = world[world["ADMIN"] == country_name]
+
+    if country.empty:
+        raise RuntimeError(f"Could not find '{country_name}' in the admin boundaries file.")
+
+    geom = country.geometry.iloc[0]
+    parts = [g for g in geom.geoms] if geom.geom_type == "MultiPolygon" else [geom]
+
+    # plot 
+    if output_plot_path:
+        import matplotlib.pyplot as plt
+        minx, miny, maxx, maxy = geom.bounds
+        width = maxx - minx
+        height = maxy - miny
+        fig, ax = plt.subplots(figsize=(8, 8 * height / width))
+        gpd.GeoSeries(parts).plot(ax=ax, color="lightblue", edgecolor="black")
+        ax.set_title(f"{country_name} Boundary")
+        plt.savefig(output_plot_path, dpi=300)
+        plt.close()
+
+    return unary_union(parts)
+
 def filter_region(df: pd.DataFrame, region: str) -> pd.DataFrame:
     """
     Region filtering happens before species vocab creation.
@@ -155,6 +185,27 @@ def filter_region(df: pd.DataFrame, region: str) -> pd.DataFrame:
 
         raise ValueError(
             "Cannot filter region='france'. Need country/region column or lon/lat columns."
+        )
+    
+    if region == 'denmark':
+        if {"lon", "lat"}.issubset(df.columns):
+            lon = pd.to_numeric(df["lon"], errors="coerce")
+            lat = pd.to_numeric(df["lat"], errors="coerce")
+            valid = lon.notna() & lat.notna()
+
+            denmark_poly = _load_country("Denmark", output_plot_path="denmark_boundary.png")
+            points = gpd.GeoSeries(
+                [Point(x, y) for x, y in zip(lon[valid], lat[valid])],
+                crs="EPSG:4326",
+            )
+            inside = points.within(denmark_poly)
+
+            mask = pd.Series(False, index=df.index)
+            mask[valid] = inside.to_numpy()
+            return df[mask].copy()
+
+        raise ValueError(
+            "Cannot filter region='denmark'. Need country/region column or lon/lat columns."
         )
 
     raise ValueError(f"Unknown region: {region}")
@@ -709,7 +760,7 @@ def parse_args():
         "--region",
         type=str,
         default="france",
-        choices=["france", "full", "all"],
+        choices=["france", "full", "all", 'denmark'],
     )
     parser.add_argument(
         "--vocab-mode",

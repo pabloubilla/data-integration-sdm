@@ -44,6 +44,9 @@ def plot_splits_overview(
     elif region == "full":
         x_lim = (-20, 40)
         y_lim = (30, 70)
+    elif region == "denmark":
+        x_lim = (7, 13)
+        y_lim = (54, 58)
     proj = ccrs.PlateCarree()
 
     options_order = ("closest", "middle", "farthest")
@@ -154,6 +157,9 @@ def plot_validation_overview(
     elif region == "full":
         x_lim = (-20, 40)
         y_lim = (30, 70)
+    elif region == "denmark":
+        x_lim = (7, 13)
+        y_lim = (54, 58)
     proj = ccrs.PlateCarree()
 
     val_options_order = ("closest_val", "middle_val", "farthest_val")
@@ -245,7 +251,9 @@ def plot_validation_overview(
 
 def main(dataset_name: str = "GeoPlant",
          region: str = "france",
-         split_type: str = "geographical"):
+         split_type: str = "geographical",
+         n_anchors: int = 10,
+         without_validation: bool = False):
 
     k_clusters = 200
     data_path = f"data/processed/{dataset_name}/{region}"
@@ -281,7 +289,6 @@ def main(dataset_name: str = "GeoPlant",
     print("covs_distance:", covs_distance)
 
     
-    n_anchors = 8
     bandwidth_scale = .2
     test_proportion = 0.25
     train_proportion_of_clusters = 0.33
@@ -299,7 +306,8 @@ def main(dataset_name: str = "GeoPlant",
         # train_proportion_of_clusters=train_proportion_of_clusters,
         distance_metric=distance_metric,
         seed=seed,
-        options=("closest", "middle", "farthest")
+        options=("closest", "middle", "farthest"),
+        reserve_validation = not without_validation
     )
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -318,7 +326,8 @@ def main(dataset_name: str = "GeoPlant",
         specs=specs,
         covs_plot=covs_plot,
         output_dir=output_dir,
-        region=region
+        region=region,
+        nrows=n_anchors
 )
     
     plot_validation_overview(
@@ -360,10 +369,12 @@ if __name__ == "__main__":
     parser.add_argument("--dataset_name", type=str, default="GeoPlant", help="Name of the dataset (used in output dir).")
     parser.add_argument("--region", type=str, default="france", help="Region name (used in output dir).")
     parser.add_argument("--split_type", type=str, default="geographical", help="Name of the split (used in output dir).")
+    parser.add_argument("--n_anchors", type=int, default=3, help="Number of anchors to use for partitioning.")
+    parser.add_argument("--without_validation", action="store_true", help="If set, do not generate validation splits.")
     args = parser.parse_args()
 
     dataset_name = args.dataset_name
     split_type = args.split_type
 
 
-    main(dataset_name=dataset_name, region=args.region, split_type=split_type)
+    main(dataset_name=dataset_name, region=args.region, split_type=split_type, n_anchors=args.n_anchors, without_validation=args.without_validation)

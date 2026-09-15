@@ -23,15 +23,15 @@ produces a handful of standard diagnostic plots into an output folder:
                                     to the console so you know how much of the
                                     variance this actually explains.
 
-Usage:
+Usage: 
     python scripts/plots/tune_results.py \
-        --csv outputs/tune/test_1/summary_popa.csv \
-        --out outputs/tune/test_1/plots
+        --csv outputs/tune/GeoPlant/france/geographical/test_0/summary_popa.csv \
+        --out outputs/tune/GeoPlant/france/geographical/test_0/plots
 
     # to control which two params go into the heatmap:
     python scripts/plots/tune_results.py \
-        --csv outputs/tune/test_1/summary_popa.csv \
-        --out outputs/tune/test_1/plots \
+        --csv outputs/tune/GeoPlant/france/geographical/test_0/summary_popa.csv \
+        --out outputs/tune/GeoPlant/france/geographical/test_0/plots \
         --heatmap_params param_lr param_w_pa
 """
 

@@ -573,7 +573,7 @@ def plot_auc_boxplots_grid(
 
 
 
-def plot_winning_methods_by_distance(
+def plot_winning_methods_by_distance_old(
     row_configs: list,                  # [{"path": ..., "metric": ..., "row_title": ...}, ...] — one row per metric
     winner_runs: dict,                  # {"PO only": run_name, "PA only": run_name, "PO + PA": run_name}
     run_name_map: dict | None = None,
@@ -653,7 +653,7 @@ def plot_winning_methods_by_distance(
     xmin = positions_by_cat[present_cats[0]][0] - box_width
     xmax = positions_by_cat[present_cats[-1]][-1] + box_width
     
-    ymin = 0.6
+    ymin = 0.3
 
 
 
@@ -734,7 +734,9 @@ def plot_winning_methods_by_distance(
     plt.show()
 
 
-def plot_winning_methods_by_distance_v2_old(
+
+
+def plot_winning_methods_by_distance(
     row_configs: list,                  # [{"path": ..., "metric": ..., "row_title": ...}, ...] — one row per metric
     winner_runs: dict,                  # {"PO only": run_name, "PA only": run_name, "PO + PA": run_name}
     run_name_map: dict | None = None,
@@ -744,175 +746,7 @@ def plot_winning_methods_by_distance_v2_old(
     metric_map: dict | None = None,
     options=("closest", "middle", "farthest"),
     single_box_categories=("PO only",),  # categories left OUT of the by-distance panel (no distance variation)
-    ymin: float = 0.55,
-    out_path: str = "winning_methods_by_distance.png",
-    derived_metrics: dict | None = None,
-):
-    """
-    Two panels per row (one row per metric):
-      - LEFT ('by distance'): x ticks are close/mid/far; at each tick, PA
-        and Integrated are drawn side by side so those two — the ones that
-        actually vary by distance — are easy to compare directly.
-      - RIGHT ('averaged'): one box per category (PO, PA, Integrated),
-        each pooling every distance's rows together, so all three sources
-        — PO included — can be compared on equal footing overall.
-
-    Deliberately simple styling: solid color per category (no gradient, no
-    hatch), a plain legend, and horizontal reference gridlines with every
-    other y-tick labeled (every 0.1) for easier row-to-row comparison.
-    """
-    if not row_configs:
-        raise ValueError("row_configs must contain at least one entry")
-
-    present_cats = [c for c in CATEGORY_ORDER if c in winner_runs]
-    dist_cats = [c for c in present_cats if c not in single_box_categories]
-    short_label = {"PO only": "PO", "PA only": "PA", "PO + PA": "PO & PA"}
-    distance_short_label = {"closest": "close", "middle": "medium", "farthest": "far"}
-    n_rows = len(row_configs)
-
-    dfs = {rc["path"]: _load_with_derived_metrics(rc["path"], derived_metrics) for rc in row_configs}
-
-    # one solid color per category — no gradient, no hatch
-    cat_colors = {cat: plt.get_cmap(CATEGORY_CMAPS.get(cat, "Greys"))(0.75) for cat in present_cats}
-
-    # --- LEFT panel positions: one close/mid/far cluster, each holding a
-    # box per dist_cats (PA, Integrated), packed tight ---
-    dist_positions_by_cat = {cat: [] for cat in dist_cats}
-    dist_tick_positions, dist_tick_labels = [], []
-    x = 0.0
-    for opt in options:
-        cluster_positions = [x + i * (box_width + within_group_gap) for i in range(len(dist_cats))]
-        for cat, pos in zip(dist_cats, cluster_positions):
-            dist_positions_by_cat[cat].append(pos)
-        dist_tick_positions.append(float(np.mean(cluster_positions)))
-        dist_tick_labels.append(distance_short_label.get(opt, opt))
-        x = cluster_positions[-1] + box_width + between_group_gap
-    dist_xmin = dist_positions_by_cat[dist_cats[0]][0] - box_width
-    dist_xmax = dist_positions_by_cat[dist_cats[-1]][-1] + box_width
-
-    # --- RIGHT panel positions: one box per category, PO included here ---
-    avg_x = np.arange(len(present_cats)) * (box_width + within_group_gap)
-    avg_positions = dict(zip(present_cats, avg_x))
-    avg_tick_positions = list(avg_positions.values())
-    avg_tick_labels = ['', 'Average', '']
-    avg_xmin = avg_tick_positions[0] - box_width
-    avg_xmax = avg_tick_positions[-1] + box_width
-
-    # column widths proportional to how many boxes each panel actually draws
-    # dist_units = len(options) * len(dist_cats) + (len(options) - 1) * 1.5
-    # avg_units = len(present_cats) * 1.5
-    # fig, axes = plt.subplots(
-    #     n_rows, 2, figsize=(0.4 * (dist_units + avg_units) + 1, 2.6 * n_rows),
-    #     squeeze=False, sharex="col", sharey="row",
-    #     gridspec_kw={"width_ratios": [dist_units, avg_units], "wspace": 0.08},
-    # )
-    dist_span = dist_xmax - dist_xmin
-    avg_span = avg_xmax - avg_xmin
-    fig, axes = plt.subplots(
-        n_rows, 2, figsize=(0.9 * (dist_span + avg_span) + 1, 2.6 * n_rows),
-        squeeze=False, sharex="col", sharey="row",
-        gridspec_kw={"width_ratios": [dist_span, avg_span], "wspace": 0.08},
-    )
-
-    def _draw_box(ax, data, position, color):
-        bp = ax.boxplot(
-            [data], positions=[position], widths=box_width, patch_artist=True,
-            medianprops=dict(color="black", linewidth=1),
-            whiskerprops=dict(linewidth=0.9, color="#555"),
-            capprops=dict(linewidth=0.9, color="#555"),
-            flierprops=dict(marker=".", markersize=3, alpha=0.4, color="#888"),
-            boxprops=dict(linewidth=0.8), manage_ticks=False,
-        )
-        for patch in bp["boxes"]:
-            patch.set_facecolor(color)
-            patch.set_alpha(0.85)
-
-    for row_i, rc in enumerate(row_configs):
-        ax_dist, ax_avg = axes[row_i]
-        df = dfs[rc["path"]]
-
-        metric = rc["metric"]
-
-        # LEFT: PA / Integrated, split by distance
-        for cat in dist_cats:
-            run = winner_runs[cat]
-            for pos, opt in zip(dist_positions_by_cat[cat], options):
-                data = df[(df["run"] == run) & (df["option"] == opt)][metric].values
-                _draw_box(ax_dist, data, pos, cat_colors[cat])
-
-        # RIGHT: PO / PA / Integrated, each pooled across every distance
-        for cat in present_cats:
-            run = winner_runs[cat]
-            data = df[df["run"] == run].groupby("test_number")[metric].mean().values  # average across distances
-            _draw_box(ax_avg, data, avg_positions[cat], cat_colors[cat])
-
-        ax_dist.set_xlim(dist_xmin, dist_xmax)
-        ax_avg.set_xlim(avg_xmin, avg_xmax)
-        for ax in (ax_dist, ax_avg):
-            ax.set_ylim(ymin, 1)
-            ax.spines[["top", "right"]].set_visible(False)
-        # ax_avg.spines["left"].set_visible(False)
-        # ax_avg.tick_params(axis="y", left=False, labelleft=False)
-
-        ylabel = metric_map.get(metric, metric) if metric_map else metric
-        ax_dist.set_ylabel(ylabel, fontsize=10)
-
-    axes[-1, 0].set_xticks(dist_tick_positions)
-    axes[-1, 0].set_xticklabels(dist_tick_labels, fontsize=9)
-    axes[-1, 0].tick_params(axis="x", length=0)
-    axes[-1, 1].set_xticks(avg_tick_positions)
-    axes[-1, 1].set_xticklabels(avg_tick_labels, fontsize=9)
-    axes[-1, 1].tick_params(axis="x", length=0)
-
-    # simple legend: one patch per category, labelled with the actual
-    # winning run so it doubles as "which run is this color"
-    legend_handles = [
-        mpatches.Patch(
-            facecolor=cat_colors[cat], alpha=0.85,
-            label=f"{short_label.get(cat, cat)}: "
-                  f"{run_name_map.get(winner_runs[cat], winner_runs[cat]) if run_name_map else winner_runs[cat]}",
-        )
-        for cat in present_cats
-    ]
-
-    # horizontal reference gridlines behind the boxes, both panels
-    for ax in axes.ravel():
-        ax.yaxis.grid(True, linestyle="--", linewidth=0.5, alpha=0.6, zorder=0)
-        ax.set_axisbelow(True)
-
-    # y-ticks every 0.05, numeric label only every 0.1 (float-safe check —
-    # `% 0.1 == 0` fails for arange floats due to precision, see np.isclose)
-    yticks = np.arange(ymin, 1.01, 0.05)
-    for ax in axes[:, 0]:
-        ax.set_yticks(yticks)
-        ax.set_yticklabels(
-            [f"{y:.2f}" if np.isclose(y * 10, np.round(y * 10)) else "" for y in yticks],
-            fontsize=8,
-        )
-    for ax in axes[:, 1]:
-        ax.set_yticks(yticks)  # keeps gridlines aligned; labels stay hidden (labelleft=False above)
-
-    plt.tight_layout(rect=[0, 0.08, 1, 1])
-    fig.legend(handles=legend_handles, loc="lower center", ncol=len(present_cats),
-               bbox_to_anchor=(0.5, 0.0), fontsize=8.5, frameon=False)
-
-    plt.savefig(out_path, dpi=350, bbox_inches="tight")
-    out_svg = os.path.splitext(out_path)[0] + ".svg"
-    plt.savefig(out_svg, bbox_inches="tight", facecolor="none")
-    print(f"[winners-by-distance] Saved → {out_path}")
-    plt.show()
-
-def plot_winning_methods_by_distance_v2(
-    row_configs: list,                  # [{"path": ..., "metric": ..., "row_title": ...}, ...] — one row per metric
-    winner_runs: dict,                  # {"PO only": run_name, "PA only": run_name, "PO + PA": run_name}
-    run_name_map: dict | None = None,
-    box_width: float = 0.5,
-    within_group_gap: float = 0.0,     # gap between PA/Integrated boxes sitting at the same distance
-    between_group_gap: float = 0.2,    # gap between close/mid/far clusters, and between avg-panel boxes
-    metric_map: dict | None = None,
-    options=("closest", "middle", "farthest"),
-    single_box_categories=("PO only",),  # categories left OUT of the by-distance panel (no distance variation)
-    ymin: float = 0.55,
+    ymin: float = 0.3,
     out_path: str = "winning_methods_by_distance.png",
     derived_metrics: dict | None = None,
 ):
@@ -941,6 +775,7 @@ def plot_winning_methods_by_distance_v2(
     n_rows = len(row_configs)
 
     dfs = {rc["path"]: _load_with_derived_metrics(rc["path"], derived_metrics) for rc in row_configs}
+
 
     # one solid color per category — no gradient, no hatch
     cat_colors = {cat: plt.get_cmap(CATEGORY_CMAPS.get(cat, "Greys"))(0.75) for cat in present_cats}
@@ -1012,6 +847,9 @@ def plot_winning_methods_by_distance_v2(
             run = winner_runs[cat]
             for pos, opt in zip(dist_positions_by_cat[cat], options):
                 data = df[(df["run"] == run) & (df["option"] == opt)][metric].values
+                # print(f"Data for {cat} - {opt} - {metric}")
+                # print(data)
+
                 _draw_box(ax_dist, data, pos, cat_colors[cat])
 
         # MIDDLE: PA / Integrated, each pooled across every distance
@@ -1265,6 +1103,147 @@ def plot_method_comparison_combined(
     )
 
 
+
+def plot_metric_vs_distance_scatter(
+    row_configs: list,          # [{"path": ..., "metric": ..., "row_title": ...}, ...] — one row per metric
+    winner_runs: dict,          # {"PO only": run_name, "PA only": run_name, "PO + PA": run_name}
+    run_name_map: dict | None = None,
+    metric_map: dict | None = None,
+    distance_col: str = "distance",
+    point_size: float = 14,
+    alpha: float = 1,
+    out_path: str = "metric_vs_distance_scatter.png",
+    derived_metrics: dict | None = None,
+):
+    """
+    For each winning run (one per source category), scatter its actual
+    `distance` column against the metric value — a direct alternative to
+    bucketing into closest/middle/farthest. One row per row_config
+    (metric), all categories overlaid with different colors in the same
+    subplot so trends across distance are directly comparable.
+    """
+
+    # only PA and Integrated
+    present_cats = ['PA only', 'PO + PA']
+
+    cat_colors = {cat: plt.get_cmap(CATEGORY_CMAPS.get(cat, "Greys"))(0.6) for cat in present_cats}
+
+    dfs = {rc["path"]: _load_with_derived_metrics(rc["path"], derived_metrics) for rc in row_configs}
+
+    n_rows = len(row_configs)
+    fig, axes = plt.subplots(n_rows, 1, figsize=(5, 3.2 * n_rows), squeeze=False)
+    axes = axes[:, 0]
+
+    for ax, rc in zip(axes, row_configs):
+        df = dfs[rc["path"]]
+        metric = rc["metric"]
+
+        for cat in present_cats:
+            run = winner_runs[cat]
+            sub = df[df["run"] == run]
+            label = f"{cat}: {run_name_map.get(run, run) if run_name_map else run}"
+            ax.scatter(sub[distance_col], sub[metric], s=point_size, alpha=alpha,
+                       color=cat_colors[cat], label=label, edgecolors="none")
+
+        ylabel = metric_map.get(metric, metric) if metric_map else metric
+        ax.set_ylabel(ylabel, fontsize=10)
+        ax.set_xlabel(distance_col, fontsize=10)
+        ax.spines[["top", "right"]].set_visible(False)
+        ax.yaxis.grid(True, linestyle="--", linewidth=0.5, alpha=0.6, zorder=0)
+        ax.set_axisbelow(True)
+
+    axes[0].legend(fontsize=8, frameon=False, loc="best")
+
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=350, bbox_inches="tight")
+    out_svg = out_path.rsplit(".", 1)[0] + ".svg"
+    plt.savefig(out_svg, bbox_inches="tight", facecolor="none")
+    print(f"[distance-scatter] Saved → {out_path}")
+    plt.show()
+
+def plot_metric_delta_vs_distance_scatter(
+    row_configs: list,
+    winner_runs: dict,
+    run_name_map: dict | None = None,
+    metric_map: dict | None = None,
+    distance_col: str = "distance_km",
+    merge_keys: tuple = ("test_number",'option'),
+    point_size: float = 14,
+    alpha: float = 0.6,  # lower default — helps a lot with overplotting
+    out_path: str = "metric_delta_vs_distance_scatter.png",
+    derived_metrics: dict | None = None,
+    color: str = "#2E7D32",
+    color_per_country: bool = True,
+):
+    dfs = {rc["path"]: _load_with_derived_metrics(rc["path"], derived_metrics) for rc in row_configs}
+
+    pa_run = winner_runs["PA only"]
+    popa_run = winner_runs["PO + PA"]
+
+    n_rows = len(row_configs)
+    fig, axes = plt.subplots(n_rows, 1, figsize=(5, 3.2 * n_rows), squeeze=False)
+    axes = axes[:, 0]
+
+    for ax, rc in zip(axes, row_configs):
+        df = dfs[rc["path"]]
+        metric = rc["metric"]
+
+        pa_df = df[df["run"] == pa_run]
+        popa_df = df[df["run"] == popa_run]
+
+        merged = pa_df.merge(popa_df, on=list(merge_keys), suffixes=("_pa", "_popa"))
+
+        # compute once, on the full merged frame — avoids chained-assignment
+        # warnings and guarantees dist/delta exist before any grouping
+        merged["dist"] = merged.get(f"{distance_col}_pa", merged.get(distance_col))
+        merged["delta"] = merged[f"{metric}_popa"] - merged[f"{metric}_pa"]
+
+        if color_per_country:
+            counts = merged["country_popa"].value_counts()
+            print(f"[delta-scatter] points per country:\n{counts}")  # sanity check
+
+            countries = sorted(merged["country_popa"].unique())
+            cmap = plt.get_cmap("tab10")
+
+            for i, country in enumerate(countries):
+                sub = merged[merged["country_popa"] == country]
+                if sub.empty:
+                    continue  # don't add a legend entry for a country with no points
+                ax.scatter(
+                    sub["dist"], sub["delta"],
+                    s=point_size, alpha=alpha,
+                    color=cmap(i % 10),
+                    edgecolors="none",
+                    label=f"{country} (n={len(sub)})",
+                    zorder=2 + i,  # keep, but see note below re: shuffling
+                )
+
+            ax.legend(title="Country", fontsize=8, title_fontsize=9, frameon=False, loc="best")
+        else:
+            ax.scatter(merged["dist"], merged["delta"], s=point_size, alpha=alpha,
+                       color=color, edgecolors="none")
+
+        ax.axhline(0, color="#888", linewidth=0.8, linestyle="--", zorder=0)
+
+        ylabel = metric_map.get(metric, metric) if metric_map else metric
+        ax.set_ylabel(f"Δ {ylabel}\n(PO+PA − PA)", fontsize=10)
+        ax.set_xlabel(distance_col, fontsize=10)
+        ax.spines[["top", "right"]].set_visible(False)
+        ax.yaxis.grid(True, linestyle="--", linewidth=0.5, alpha=0.6, zorder=0)
+        ax.set_axisbelow(True)
+
+    label = (f"{run_name_map.get(popa_run, popa_run) if run_name_map else popa_run} − "
+             f"{run_name_map.get(pa_run, pa_run) if run_name_map else pa_run}")
+    axes[0].set_title(label, fontsize=9)
+
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=350, bbox_inches="tight")
+    out_svg = out_path.rsplit(".", 1)[0] + ".svg"
+    plt.savefig(out_svg, bbox_inches="tight", facecolor="none")
+    print(f"[delta-scatter] Saved → {out_path}")
+    plt.show()
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Plot AUC boxplots grouped by run and option.")
     parser.add_argument("--dataset_name", default="GeoPlant", type=str)
@@ -1470,9 +1449,30 @@ if __name__ == "__main__":
                 ]
                 out_path = (f"{output_dir_for(split_type)}/plots/winning_methods_grid_{split_type}.png")    
                 os.makedirs(os.path.dirname(out_path), exist_ok=True)
-                plot_winning_methods_by_distance_v2(row_configs, winner_runs[split_type], run_name_map=run_name_map,
+                plot_winning_methods_by_distance(row_configs, winner_runs[split_type], run_name_map=run_name_map,
                                   metric_map=metric_map, derived_metrics=derived_metrics,
                                   out_path=out_path)
+                
+                # # scatter plot of metric vs distance for winning methods
+                # plot_metric_vs_distance_scatter(
+                #     row_configs,
+                #     winner_runs[split_type],
+                #     run_name_map=run_name_map,
+                #     metric_map=metric_map,
+                #     out_path=f"{output_dir_for(split_type)}/plots/winning_methods_scatter_{split_type}.png",
+                #     derived_metrics=derived_metrics
+                # )
+
+                # delta 
+                if region == 'agg_regions':
+                    plot_metric_delta_vs_distance_scatter(
+                        row_configs,
+                        winner_runs[split_type],
+                        run_name_map=run_name_map,
+                        metric_map=metric_map,
+                        out_path=f"{output_dir_for(split_type)}/plots/winning_methods_delta_scatter_{split_type}.png",
+                        derived_metrics=derived_metrics
+                    )
 
         if args.plot_type in ("comparison", "all"):
             # All methods together in one panel, clustered by source,
@@ -1503,5 +1503,5 @@ if __name__ == "__main__":
                 bold_best=True,
                 caption="Comparison of winning losses across splits.",
                 label="tab:method_comparison",
-                out_path="outputs/tables/method_comparison.tex",
+                out_path=f"outputs/tables/{region}_method_comparison.tex",
             )

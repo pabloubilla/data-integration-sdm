@@ -36,6 +36,12 @@ class SplitSpec:
     species_list: list[int] = None
     anchor: list[float] = None
 
+def load_split(split_dir: str | Path, split_file: str):
+    split_dir = Path(split_dir)
+    arr = np.load(split_dir / split_file)
+    print(arr)
+    return arr
+
 
 def _species_for(idx: np.ndarray, y_pa: pd.DataFrame) -> list[int]:
     return sorted(set(s for i in idx for s in y_pa[i]))

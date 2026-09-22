@@ -47,7 +47,14 @@ def plot_splits_overview(
     elif region == "denmark":
         x_lim = (7, 13)
         y_lim = (54, 58)
+    elif region == "sparse_pa":
+        x_lim = (-20, 40)
+        y_lim = (30, 70)
+    else:
+        x_lim = (np.min(X_mat[:, 0]), np.max(X_mat[:, 0]))
+        y_lim = (np.min(X_mat[:, 1]), np.max(X_mat[:, 1]))
     proj = ccrs.PlateCarree()
+    
 
     options_order = ("closest", "middle", "farthest")
 
@@ -160,6 +167,12 @@ def plot_validation_overview(
     elif region == "denmark":
         x_lim = (7, 13)
         y_lim = (54, 58)
+    elif region == "sparse_pa":
+        x_lim = (-20, 40)
+        y_lim = (30, 70)
+    else:
+        x_lim = (np.min(X_mat[:, 0]), np.max(X_mat[:, 0]))
+        y_lim = (np.min(X_mat[:, 1]), np.max(X_mat[:, 1]))
     proj = ccrs.PlateCarree()
 
     val_options_order = ("closest_val", "middle_val", "farthest_val")

@@ -5,7 +5,7 @@ import json
 import os
 import pickle
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 import numpy as np
 import pandas as pd
@@ -35,11 +35,11 @@ NON_COVARIATE_COLS = {
 DEFAULT_METADATA_COLS = ["lon", "lat", "areaInM2"]
 
 
+_WORLD_CACHE = None
+
 # -------------------------
 # basic helpers
 # -------------------------
-
-
 
 def coerce_int_col(df: pd.DataFrame, col: str) -> pd.DataFrame:
     df = df.copy()
@@ -143,6 +143,40 @@ def _load_country(country_name: str, output_plot_path: Optional[str] = None):
 
     return unary_union(parts)
 
+def _load_world():
+    global _WORLD_CACHE
+    if _WORLD_CACHE is None:
+        url = "https://naturalearth.s3.amazonaws.com/10m_cultural/ne_10m_admin_0_countries.zip"
+        _WORLD_CACHE = gpd.read_file(url)
+    return _WORLD_CACHE
+
+def _load_region(country_names: List[str], output_plot_path: Optional[str] = None):
+    world = _load_world()
+    subset = world[world["ADMIN"].isin(country_names)]
+
+    found = set(subset["ADMIN"])
+    missing = set(country_names) - found
+    if missing:
+        print(f"Warning: skipping countries not found in ADMIN field: {missing}")
+    if subset.empty:
+        raise RuntimeError("None of the requested countries were found.")
+    exit()
+
+    geom = unary_union(subset.geometry.values)
+    parts = [g for g in geom.geoms] if geom.geom_type == "MultiPolygon" else [geom]
+
+    if output_plot_path:
+        import matplotlib.pyplot as plt
+        minx, miny, maxx, maxy = geom.bounds
+        width, height = maxx - minx, maxy - miny
+        fig, ax = plt.subplots(figsize=(8, 8 * height / width))
+        gpd.GeoSeries(parts).plot(ax=ax, color="lightblue", edgecolor="black")
+        ax.set_title("Region Boundary")
+        plt.savefig(output_plot_path, dpi=300)
+        plt.close()
+
+    return unary_union(parts)
+
 def filter_region(df: pd.DataFrame, region: str) -> pd.DataFrame:
     """
     Region filtering happens before species vocab creation.
@@ -208,7 +242,79 @@ def filter_region(df: pd.DataFrame, region: str) -> pd.DataFrame:
             "Cannot filter region='denmark'. Need country/region column or lon/lat columns."
         )
 
-    raise ValueError(f"Unknown region: {region}")
+    if region == "sparse_pa":
+        # for col in ["country", "region"]:
+        #     if col in df.columns:
+        #         vals = df[col].astype(str).str.lower()
+        #         mask = vals.isin({"sparse_pa"})
+        #         return df[mask].copy()
+
+        if {"lon", "lat"}.issubset(df.columns):
+            lon = pd.to_numeric(df["lon"], errors="coerce")
+            lat = pd.to_numeric(df["lat"], errors="coerce")
+            valid = lon.notna() & lat.notna()
+
+            sparse_countries  = [
+                    "Germany", "Switzerland", "Austria", "Poland",
+                    "Czechia", "Czech Republic",
+                    "Slovakia", "Hungary", "Italy", "Slovenia", "Croatia",
+                    "Bosnia and Herzegovina",
+                    "Republic of Serbia", "Serbia",
+                    "Montenegro", "Albania", "North Macedonia", "Greece",
+                    "Kosovo",
+                    "Romania",
+                    "Bulgaria",
+                    "Latvia",
+                ]
+                            
+
+            sparse_pa_poly = _load_region(sparse_countries, output_plot_path="sparse_pa_boundary.png")
+            points = gpd.GeoSeries(
+                [Point(x, y) for x, y in zip(lon[valid], lat[valid])],
+                crs="EPSG:4326",
+            )
+            inside = points.within(sparse_pa_poly)
+
+            mask = pd.Series(False, index=df.index)
+            mask[valid] = inside.to_numpy()
+            return df[mask].copy()
+
+        raise ValueError(
+            "Cannot filter region='sparse_pa'. Need country/region column or lon/lat columns."
+        )
+    
+    if region == 'bene':
+        countries = ['Belgium', 'Netherlands']
+        bene_poly = _load_region(countries, output_plot_path="bene_boundary.png")
+        points = gpd.GeoSeries(
+            [Point(x, y) for x, y in zip(lon[valid], lat[valid])],
+            crs="EPSG:4326",
+        )
+        inside = points.within(bene_poly)
+
+        mask = pd.Series(False, index=df.index)
+        mask[valid] = inside.to_numpy()
+        return df[mask].copy()
+
+    else:
+        # standard treatment (normal region), use function _load_country
+        if {"lon", "lat"}.issubset(df.columns):
+            lon = pd.to_numeric(df["lon"], errors="coerce")
+            lat = pd.to_numeric(df["lat"], errors="coerce")
+            valid = lon.notna() & lat.notna()
+
+            country_poly = _load_country(region.capitalize(), output_plot_path=f"{region}_boundary.png")
+            points = gpd.GeoSeries(
+                [Point(x, y) for x, y in zip(lon[valid], lat[valid])],
+                crs="EPSG:4326",
+            )
+            inside = points.within(country_poly)
+
+            mask = pd.Series(False, index=df.index)
+            mask[valid] = inside.to_numpy()
+            return df[mask].copy()
+
+
 
 # def filter_region(df: pd.DataFrame, region: str) -> pd.DataFrame:
 #     """
@@ -516,6 +622,13 @@ def preprocess_geoplant(
     pa_test_df = pd.read_csv(pa_path / "test_labels.csv")
     pa_test_metadata = pd.read_csv(pa_path / "PA_metadata_test.csv")
 
+    ### if it is denmark, filter out 'Miljøstyrelsen / The Danish Environmental Protection Agency' from PO as it could lead to leakage
+    ### using the column 'publisher' in the PO_metadata_train.csv file
+    if region == 'denmark':
+        original_len = len(po_df)
+        po_df = po_df[po_df['publisher'] != 'Miljøstyrelsen / The Danish Environmental Protection Agency'].copy()
+        print(f"Filtered out {original_len - len(po_df)} rows from PO due to publisher filter for Denmark region.")
+
     po_df = normalize_lon_lat(po_df)
     pa_train_df = normalize_lon_lat(pa_train_df)
     pa_test_metadata = normalize_lon_lat(pa_test_metadata)
@@ -760,7 +873,7 @@ def parse_args():
         "--region",
         type=str,
         default="france",
-        choices=["france", "full", "all", 'denmark'],
+        # choices=["france", "full", "all", 'denmark', "sparse_pa"],
     )
     parser.add_argument(
         "--vocab-mode",

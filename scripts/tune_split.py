@@ -41,38 +41,39 @@ VAL_PATIENCE = 5
 # ─────────────────────────────────────────────
 #  PA
 # ─────────────────────────────────────────────
+N_TRIALS_PA = 250
 PARAM_GRID_PA = {
     "lr":            [5e-3, 1e-3, 5e-4, 1e-4],
-    "weight_decay":  [5e-3, 1e-3, 5e-4, 1e-4, 5e-5, 1e-5, 0],
-    "hidden_dim":    [100,250,500],
+    "weight_decay":  [1e-3, 1e-4, 1e-5, 0],
+    "hidden_dim":    [100, 250, 500, 1000],
     "hidden_layers": [1,2,3],
-    "batch_size":    [100,200,500,1000],
+    "batch_size":    [50,100,200,500,1000],
 }
 LOSS_NAMES_PA = ["bce", "balanced_bce"]
-N_TRIALS_PA = 100
 
 # ─────────────────────────────────────────────
 #  PO
 # ─────────────────────────────────────────────
+N_TRIALS_PO = 250
 PARAM_GRID_PO = {
     "lr":            [5e-3, 1e-3, 5e-4, 1e-4],
-    "weight_decay":  [1e-3, 5e-4, 1e-4, 5e-5, 1e-5, 0],
-    "hidden_dim":    [100,250,500],
+    "weight_decay":  [1e-3, 1e-4, 1e-5, 0],
+    "hidden_dim":    [100, 250, 500, 1000],
     "hidden_layers": [1,2,3],
-    "batch_size":    [100,200,500,1000],
+    "batch_size":    [50,100,200,500,1000],
 }
 LOSS_NAMES_PO = ["deep_maxent", "balanced_bce", "bce"]
-N_TRIALS_PO = 100
 
 # ─────────────────────────────────────────────
 #  POPA
 # ─────────────────────────────────────────────
+N_TRIALS_POPA = 250
 PARAM_GRID_POPA = {
     "lr":            [5e-3, 1e-3, 5e-4, 1e-4],
-    "weight_decay":  [1e-3, 5e-4, 1e-4, 5e-5, 1e-5, 0],
-    "hidden_dim":    [100,250,500],
+    "weight_decay":  [1e-3, 1e-4, 1e-5, 0],
+    "hidden_dim":    [100, 250, 500, 1000],
     "hidden_layers": [1,2,3],
-    "batch_size":    [100,200,500,1000],
+    "batch_size":    [50,100,200,500,1000],
 }
 LOSS_COMBOS_POPA = [
     ("deep_maxent", "balanced_bce_ippp"),
@@ -95,7 +96,6 @@ W_PA_PO_PAIRS = [
     (0.9, 0.1),
     (1.0, 0.0),
 ]  # (w_pa, w_po) pairs from (0.0,1.0) to (1.0,0.0)
-N_TRIALS_POPA = 100
 
 FIXED = {"seed": 42}
 

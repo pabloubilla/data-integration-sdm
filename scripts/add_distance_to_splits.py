@@ -1,142 +1,70 @@
+"""
+Add distance_km to each split: mean great-circle distance (km) from each
+test point to its nearest train point. Writes it into splits.csv and,
+if present, into the split sweep's summary_common.csv.
+"""
+
+import shutil
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from pyproj import Transformer
-from sklearn.metrics import pairwise_distances
 
+from isdm.utils import haversine_tree, nearest_km
 from isdm.load_data import load_geoplant_processed
-from isdm.splits_bands import load_split_specs, load_split
+from isdm.splits_bands import load_split, load_split_specs
+
+COORD_COLS = ["lon", "lat"]
 
 
-def project_to_lambert93(lon: np.ndarray, lat: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """
-    Project lon/lat (EPSG:4326) to Lambert-93 (EPSG:2154), in meters.
-    Mainland France + Corsica only — do not use for overseas territories.
-    """
-    transformer = Transformer.from_crs("EPSG:4326", "EPSG:2154", always_xy=True)
-    x_m, y_m = transformer.transform(lon, lat)
-    return x_m, y_m
+def split_distance_km(lonlat, train_idx, test_idx):
+    if len(train_idx) == 0 or len(test_idx) == 0:
+        return np.nan
+    tree = haversine_tree(lonlat[train_idx])
+    return float(nearest_km(tree, lonlat[test_idx]).mean())
 
 
-def add_distance_km(
-    split_dir: str | Path,
-    X_pa: pd.DataFrame,
-    lat_col: str = "lat",
-    lon_col: str = "lon",
-    out_csv: str | Path | None = None,
-    split_sweep_dir: str | Path | None = None,
-    add_to_sweep: bool = True,
-) -> pd.DataFrame:
-    """
-    Load splits.csv from split_dir (via load_split_specs), compute a physical
-    distance_km per split (mean min distance from test points to nearest train
-    point, in km, projected to Lambert-93), and write it back.
-
-    Parameters
-    ----------
-    split_dir : directory containing splits.csv and the per-split .npz files
-    X_pa      : dataframe used to generate the splits (data.X_pa_train, loaded
-                with add_coordinates=True), in the SAME row order as when the
-                splits were generated
-    out_csv   : where to save the updated csv. Defaults to overwriting
-                splits.csv in split_dir (a .bak backup is written first).
-
-    Returns
-    -------
-    The updated splits dataframe (also written to disk).
-    """
+def add_distance_km(split_dir, X_pa, sweep_csv=None):
+    """X_pa must be in the same row order used to generate the splits (data.X_pa_train)."""
     split_dir = Path(split_dir)
-    df = load_split_specs(split_dir)
+    specs = load_split_specs(split_dir)
+    lonlat = X_pa[COORD_COLS].to_numpy()
 
-    if len(X_pa) == 0:
-        raise ValueError("X_pa is empty.")
-    for col in (lat_col, lon_col):
-        if col not in X_pa.columns:
-            raise ValueError(
-                f"Column '{col}' not found in X_pa — did you load it with "
-                "add_coordinates=True?"
-            )
-
-    x_m, y_m = project_to_lambert93(
-        X_pa[lon_col].to_numpy(), X_pa[lat_col].to_numpy()
-    )
-    coords_m = np.column_stack([x_m, y_m])
-    n_coords = len(coords_m)
-
-    distances_km = []
-    for _, row in df.iterrows():
+    distances = []
+    for _, row in specs.iterrows():
         split = load_split(split_dir, row["split_file"])
         train_idx, test_idx = split["train_idx"], split["test_idx"]
+        if max(train_idx.max(initial=-1), test_idx.max(initial=-1)) >= len(lonlat):
+            raise ValueError(f"{row['split_id']}: indices exceed X_pa rows ({len(lonlat)}). Wrong row order?")
+        distances.append(split_distance_km(lonlat, train_idx, test_idx))
+    specs["distance_km"] = distances
 
-        if train_idx.max(initial=-1) >= n_coords or test_idx.max(initial=-1) >= n_coords:
-            raise ValueError(
-                f"Index out of range for split {row['split_id']}: "
-                f"X_pa has {n_coords} rows but indices go higher. "
-                "X_pa is likely not in the same order used to generate the splits."
-                f"Train idx max: {train_idx.max(initial=-1)}, test idx max: {test_idx.max(initial=-1)}"
-            )
-            
+    splits_csv = split_dir / "splits.csv"
+    backup = split_dir / "splits.csv.bak"
+    if not backup.exists():
+        shutil.copy(splits_csv, backup)
+    specs.to_csv(splits_csv, index=False)
+    print(f"  wrote distance_km for {len(specs)} splits -> {splits_csv}")
 
-        if len(train_idx) == 0 or len(test_idx) == 0:
-            distances_km.append(np.nan)
-            continue
+    if sweep_csv is not None and Path(sweep_csv).exists():
+        sweep = pd.read_csv(sweep_csv).drop(columns="distance_km", errors="ignore")
+        sweep = sweep.merge(specs[["split_id", "distance_km"]], on="split_id", how="left")
+        sweep.to_csv(sweep_csv, index=False)
+        print(f"  updated distance_km in {sweep_csv}")
 
-        D = pairwise_distances(coords_m[test_idx], coords_m[train_idx], metric="euclidean")
-        distances_km.append(float(D.min(axis=1).mean()) / 1000.0)
-
-    df["distance_km"] = distances_km
-
-    out_csv = Path(out_csv) if out_csv else split_dir / "splits.csv"
-    if out_csv == split_dir / "splits.csv":
-        backup = split_dir / "splits.csv.bak"
-        if not backup.exists():
-            load_split_specs(split_dir).to_csv(backup, index=False)
-            print(f"Backed up original splits.csv to {backup}")
-
-    df.to_csv(out_csv, index=False)
-    print(f"Wrote distance_km for {len(df)} splits to {out_csv}")
-
-    if split_sweep_dir is not None and add_to_sweep:
-        split_sweep_dir = Path(split_sweep_dir)
-        sweep_csv = split_sweep_dir / "summary_common.csv"
-        if sweep_csv.exists():
-            sweep_df = pd.read_csv(sweep_csv)
-            sweep_df = sweep_df.merge(df[["split_id", "distance_km"]], on="split_id", how="left")
-            # if _x and _y check they are the same and keep only distance_km
-            if "distance_km_x" in sweep_df.columns and "distance_km_y" in sweep_df.columns:
-                if not np.allclose(sweep_df["distance_km_x"], sweep_df["distance_km_y"], equal_nan=True):
-                    raise ValueError("distance_km values in sweep and splits do not match.")
-                sweep_df["distance_km"] = sweep_df["distance_km_x"]
-                sweep_df = sweep_df.drop(columns=["distance_km_x", "distance_km_y"])
-
-            sweep_df.to_csv(sweep_csv, index=False)
-            print(f"Added distance_km to {sweep_csv} ({len(sweep_df)} rows)")
-    return df
+    return specs
 
 
 if __name__ == "__main__":
-    # add_coordinates=True is required — lat/lon get dropped from the
-    # covariates dataframe otherwise. X_pa_train is what the splits were
-    # generated from (the PA pool carved into train/test bands via
-    # partition_sweep_bands / partition_sweep_ranges_v2_indices);
-    # X_pa_test is the held-out set and was not part of split generation.
-
-
-    countries_to_run = ['france', 'denmark', 'netherlands', 'sparse_pa']
+    regions = ["france", "denmark", "bene", "sparse_pa"]
     split_types = ["geographical", "environmental"]
-    for country in countries_to_run:
+
+    for region in regions:
+        data = load_geoplant_processed(processed_root=f"data/processed/GeoPlant/{region}", add_coordinates=True)
         for split_type in split_types:
-            data = load_geoplant_processed(
-                    processed_root=f"data/processed/GeoPlant/{country}",
-                    add_coordinates=True,
-                )
-            print(f"Adding distance_km to splits for {country} ({split_type})...")
+            print(f"{region} / {split_type}")
             add_distance_km(
-                split_dir=f"outputs/splits/GeoPlant/{country}_bands/{split_type}",
+                split_dir=f"outputs/splits/GeoPlant/{region}_bands/{split_type}",
                 X_pa=data.X_pa_train,
-                lat_col="lat",
-                lon_col="lon",
-                split_sweep_dir =f"outputs/split_sweep/GeoPlant/{country}_bands/{split_type}/intersect",
-                add_to_sweep=True,
+                sweep_csv=f"outputs/split_sweep/GeoPlant/{region}_bands/{split_type}/intersect/summary_common.csv",
             )

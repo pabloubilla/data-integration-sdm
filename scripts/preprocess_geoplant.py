@@ -160,7 +160,6 @@ def _load_region(country_names: List[str], output_plot_path: Optional[str] = Non
         print(f"Warning: skipping countries not found in ADMIN field: {missing}")
     if subset.empty:
         raise RuntimeError("None of the requested countries were found.")
-    exit()
 
     geom = unary_union(subset.geometry.values)
     parts = [g for g in geom.geoms] if geom.geom_type == "MultiPolygon" else [geom]
@@ -283,18 +282,39 @@ def filter_region(df: pd.DataFrame, region: str) -> pd.DataFrame:
             "Cannot filter region='sparse_pa'. Need country/region column or lon/lat columns."
         )
     
-    if region == 'bene':
-        countries = ['Belgium', 'Netherlands']
-        bene_poly = _load_region(countries, output_plot_path="bene_boundary.png")
-        points = gpd.GeoSeries(
-            [Point(x, y) for x, y in zip(lon[valid], lat[valid])],
-            crs="EPSG:4326",
-        )
-        inside = points.within(bene_poly)
 
-        mask = pd.Series(False, index=df.index)
-        mask[valid] = inside.to_numpy()
-        return df[mask].copy()
+    if region == "bene":
+        print("Filtering for region='bene' (Belgium + Netherlands).")
+        # for col in ["country", "region"]:
+        #     if col in df.columns:
+        #         vals = df[col].astype(str).str.lower()
+        #         mask = vals.isin({"sparse_pa"})
+        #         return df[mask].copy()
+
+        if {"lon", "lat"}.issubset(df.columns):
+            lon = pd.to_numeric(df["lon"], errors="coerce")
+            lat = pd.to_numeric(df["lat"], errors="coerce")
+            valid = lon.notna() & lat.notna()
+
+            countries  = [
+                    "Belgium", "Netherlands"
+                ]
+                            
+
+            sparse_pa_poly = _load_region(countries, output_plot_path="sparse_pa_boundary.png")
+            points = gpd.GeoSeries(
+                [Point(x, y) for x, y in zip(lon[valid], lat[valid])],
+                crs="EPSG:4326",
+            )
+            inside = points.within(sparse_pa_poly)
+
+            mask = pd.Series(False, index=df.index)
+            mask[valid] = inside.to_numpy()
+            return df[mask].copy()
+
+        raise ValueError(
+            "Cannot filter region='sparse_pa'. Need country/region column or lon/lat columns."
+        )
 
     else:
         # standard treatment (normal region), use function _load_country

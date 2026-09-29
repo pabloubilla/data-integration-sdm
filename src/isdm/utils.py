@@ -1,6 +1,21 @@
 import random
 import numpy as np
 import torch
+import numpy as np
+from sklearn.neighbors import BallTree
+
+EARTH_RADIUS_KM = 6371.0088
+
+
+def haversine_tree(lonlat: np.ndarray) -> BallTree:
+    """BallTree on (N, 2) [lon, lat] points in degrees."""
+    return BallTree(np.radians(np.asarray(lonlat)[:, ::-1]), metric="haversine")
+
+
+def nearest_km(tree: BallTree, lonlat: np.ndarray) -> np.ndarray:
+    """Great-circle distance (km) from each [lon, lat] point to its nearest point in `tree`."""
+    dist_rad, _ = tree.query(np.radians(np.asarray(lonlat)[:, ::-1]), k=1)
+    return dist_rad[:, 0] * EARTH_RADIUS_KM
 
 
 def set_all_seeds(seed: int):

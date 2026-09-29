@@ -254,10 +254,14 @@ def partition_sweep_bands(
     if n == 0:
         raise ValueError("X_pa is empty.")
 
+
+
+
     scaler = StandardScaler()
     X[covs_distance] = scaler.fit_transform(X[covs_distance])
 
     D = compute_distance_matrix(X, covariates=covs_distance, metric=distance_metric)
+    # assign each point to a grid cell, which becomes a cluster. The grid is defined by the covariates used for clustering.
     labels, grid_info = make_grid_clusters(X, covariates=covs_cluster, n_bins_per_axis=n_bins_per_axis)
     print(f"Assigned {n} points to {len(grid_info)} grid cells.")
 

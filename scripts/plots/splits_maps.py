@@ -148,6 +148,7 @@ def plot_paper_splits_figure(
     x_lim: tuple[float, float] = (-5, 8.5),
     y_lim: tuple[float, float] = (42, 51.5),
     output_path: str | Path = "paper_splits_figure.png",
+    region = None,
     po_sample_size: int | None = None,
     rng_seed: int = 0,
     po_gap_ratio: float = .4,
@@ -158,6 +159,24 @@ def plot_paper_splits_figure(
     PO is kept constant on the left
 
     """
+
+    if region is not None:
+        if region == "france":
+            x_lim = (-5, 8.5)
+            y_lim = (42, 51.5)
+        elif region == "denmark":
+            # Jutland + islands + Bornholm (~14.9E), Skagen at ~10.6E / 57.75N
+            x_lim = (7.8, 15.3)
+            y_lim = (54.4, 57.9)
+        elif region == "bene":
+            # Belgium + Netherlands (incl. Wadden islands up top, Limburg down south)
+            x_lim = (2.4, 7.3)
+            y_lim = (49.4, 53.7)
+        elif region == "sparse_pa":
+            # Central + Eastern Europe (roughly Germany/Poland/Baltics to Ukraine/Romania/Balkans)
+            x_lim = (5, 25)
+            y_lim = (35, 55)
+
     use_cartopy = HAS_CARTOPY
     if not use_cartopy:
         print("cartopy not available — falling back to plain scatter (no basemap).")
@@ -286,35 +305,63 @@ def plot_paper_splits_figure(
 def main():
     from isdm.load_data import load_geoplant_processed  # local import: only needed for the CLI entry point
 
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--geo_split_dir", type=Path,
-                         default=Path("outputs/splits/GeoPlant/france_bands/geographical"))
-    parser.add_argument("--env_split_dir", type=Path,
-                         default=Path("outputs/splits/GeoPlant/france_bands/environmental"))
-    parser.add_argument("--data_path", type=str, default="data/processed/GeoPlant/france")
-    parser.add_argument("--output", type=Path, default=Path("outputs/figures/splits_maps.png"))
-    args = parser.parse_args()
+    regions = ["france", "denmark", "bene", "sparse_pa"]
 
-    data = load_geoplant_processed(args.data_path, add_coordinates=True)
 
-    covs_plot = [c for c in ["lon", "lat", "x", "y"] if c in data.X_pa_train.columns][:2]
-    X_pa = data.X_pa_train.reset_index(drop=True)[covs_plot].to_numpy()
-    X_po = data.X_po.reset_index(drop=True)[covs_plot].to_numpy()
+    for region in regions:
 
-    geo_specs = load_saved_specs(args.geo_split_dir)
-    env_specs = load_saved_specs(args.env_split_dir)
+        data_path = f"data/processed/GeoPlant/{region}"
+        split_dir = Path(f"outputs/splits/GeoPlant/{region}_bands")
+        output_path = Path(f"outputs/figures/splits_maps_{region}.png")
 
-    plot_paper_splits_figure(
-        X_pa=X_pa,
-        X_po=X_po,
-        geo_specs=geo_specs,
-        env_specs=env_specs,
-        output_path=args.output,
-        ### Splits chosen to be schematic
-        # Note that the order is arbitrary (for intance there is nothing particular about k=1 or k=7)
-        geo_split_list=[0,1,2],
-        env_split_list=[2,0,6]
-    )
+
+        data = load_geoplant_processed(data_path, add_coordinates=True)
+        X_pa = data.X_pa_train.reset_index(drop=True)[["lon", "lat"]].to_numpy()
+        X_po = data.X_po.reset_index(drop=True)[["lon", "lat"]].to_numpy()
+
+        specs_geo = load_saved_specs(split_dir / "geographical")
+        specs_env = load_saved_specs(split_dir / "environmental")
+
+        plot_paper_splits_figure(
+            X_pa=X_pa,
+            X_po=X_po,
+            geo_specs=specs_geo,
+            env_specs=specs_env,
+            geo_split_list=[0, 1, 2],
+            env_split_list=[0, 1, 2],
+            output_path=output_path,
+            region=region
+        )
+
+    # parser = argparse.ArgumentParser()
+    # parser.add_argument("--geo_split_dir", type=Path,
+    #                      default=Path("outputs/splits/GeoPlant/france_bands/geographical"))
+    # parser.add_argument("--env_split_dir", type=Path,
+    #                      default=Path("outputs/splits/GeoPlant/france_bands/environmental"))
+    # parser.add_argument("--data_path", type=str, default="data/processed/GeoPlant/france")
+    # parser.add_argument("--output", type=Path, default=Path("outputs/figures/splits_maps.png"))
+    # args = parser.parse_args()
+
+    # data = load_geoplant_processed(args.data_path, add_coordinates=True)
+
+    # covs_plot = [c for c in ["lon", "lat", "x", "y"] if c in data.X_pa_train.columns][:2]
+    # X_pa = data.X_pa_train.reset_index(drop=True)[covs_plot].to_numpy()
+    # X_po = data.X_po.reset_index(drop=True)[covs_plot].to_numpy()
+
+    # geo_specs = load_saved_specs(args.geo_split_dir)
+    # env_specs = load_saved_specs(args.env_split_dir)
+
+    # plot_paper_splits_figure(
+    #     X_pa=X_pa,
+    #     X_po=X_po,
+    #     geo_specs=geo_specs,
+    #     env_specs=env_specs,
+    #     output_path=args.output,
+    #     ### Splits chosen to be schematic
+    #     # Note that the order is arbitrary (for intance there is nothing particular about k=1 or k=7)
+    #     geo_split_list=[0,1,2],
+    #     env_split_list=[2,0,6]
+    # )
 
 
 if __name__ == "__main__":

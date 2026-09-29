@@ -47,7 +47,7 @@ def aggregate(dataset_name, regions, split_types, spec_name="intersect", agg_nam
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Concatenate summary_common.csv across multiple regions.")
     parser.add_argument("--dataset_name", default="GeoPlant", type=str)
-    parser.add_argument("--regions", type=str, default="france,netherlands,sparse_pa,denmark")
+    parser.add_argument("--regions", type=str, default="france,bene,sparse_pa,denmark")
     parser.add_argument("--split_types", default="geographical,environmental", type=str)
     parser.add_argument("--use_overlapping_species", action="store_true")
     parser.add_argument("--agg_name", default="agg_regions", type=str,

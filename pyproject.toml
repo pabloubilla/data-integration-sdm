@@ -1,9 +1,27 @@
 [project]
 name = "isdm"
 version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "pabloubilla", email = "pabloubilla1998@gmail.com" }
+]
+requires-python = ">=3.11"
+dependencies = [
+    "cvxpy>=1.9.3",
+    "geopandas>=1.2.0",
+    "joblib>=1.6.0",
+    "k-means-constrained>=0.9.1",
+    "matplotlib>=3.11.2",
+    "pandas>=3.0.6",
+    "pyyaml>=6.0.3",
+    "rasterio>=1.4.4",
+    "scikit-learn>=1.9.1",
+    "scipy>=1.17.1",
+    "torch>=2.14.0",
+    "tqdm>=4.70.1",
+]
 
-[tool.setuptools]
-package-dir = {"" = "src"}
-
-[tool.setuptools.packages.find]
-where = ["src"]
+[build-system]
+requires = ["uv_build>=0.12.9,<0.13.0"]
+build-backend = "uv_build"

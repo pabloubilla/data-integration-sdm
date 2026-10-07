@@ -8,6 +8,8 @@ import os
 import numpy as np
 import matplotlib.patheffects as pe
 
+from isdm.metrics import harmonic_mean
+
 
 CATEGORY_ORDER = ["PO only", "PA only", "PO + PA"]
 
@@ -416,15 +418,15 @@ def _canonical_runs(paths, run_order):
     return [r for r in run_order if r in present]
 
 
-def _harmonic_mean(a, b):
-    """Row-wise harmonic mean of two columns, NaN-safe. Returns NaN where
-    both values are zero/undefined instead of dividing by zero."""
-    a = np.asarray(a, dtype=float)
-    b = np.asarray(b, dtype=float)
-    denom = a + b
-    with np.errstate(divide="ignore", invalid="ignore"):
-        hm = np.where(denom > 0, 2 * a * b / denom, np.nan)
-    return hm
+# def _harmonic_mean(a, b):
+#     """Row-wise harmonic mean of two columns, NaN-safe. Returns NaN where
+#     both values are zero/undefined instead of dividing by zero."""
+#     a = np.asarray(a, dtype=float)
+#     b = np.asarray(b, dtype=float)
+#     denom = a + b
+#     with np.errstate(divide="ignore", invalid="ignore"):
+#         hm = np.where(denom > 0, 2 * a * b / denom, np.nan)
+#     return hm
 
 
 def _load_with_derived_metrics(path, derived_metrics):
@@ -435,7 +437,7 @@ def _load_with_derived_metrics(path, derived_metrics):
     df = pd.read_csv(os.path.join(path, "summary_common.csv"))
     if derived_metrics:
         for new_col, (metric_a, metric_b) in derived_metrics.items():
-            df[new_col] = _harmonic_mean(df[metric_a], df[metric_b])
+            df[new_col] = harmonic_mean(df[metric_a], df[metric_b])
     return df
 
 
@@ -1201,34 +1203,57 @@ def plot_metric_delta_vs_distance_scatter(
         frames.append(m[[distance_col, "delta", "country"]])
         print(f"[delta-scatter] {metric} points per country:\n{m['country'].value_counts()}")
 
-    # --- 2. One style (colour + marker) per country, shared by plot & legend -
+    # # --- 2. One style (colour + marker) per country, shared by plot & legend -
     countries = ["Denmark", "BeNe", "Cont. France", "CEE"]  # order by extent
     cmap = plt.get_cmap("Dark2")
+
+
     markers = ["o", "s", "P", "D"]
     style = {c: dict(color=cmap(i), marker=markers[i]) for i, c in enumerate(countries)}
 
+
+
+
     # --- 3. Plot ------------------------------------------------------------
+    # fig, axes = plt.subplots(
+    #     len(row_configs), 1, figsize=(5, 3.2 * len(row_configs)),
+    #     sharex=True, squeeze=False, layout="constrained",
+    # )
     fig, axes = plt.subplots(
-        len(row_configs), 1, figsize=(5, 3.2 * len(row_configs)),
-        sharex=True, squeeze=False, layout="constrained",
+        1, len(row_configs), figsize=(3.5 * len(row_configs), 3.2),
+        sharex=True, squeeze=False
     )
-    for ax, rc, f in zip(axes[:, 0], row_configs, frames):
+    fig.subplots_adjust(wspace=.6)
+
+    for ax, rc, f in zip(axes[0, :], row_configs, frames):
+        # if color_per_country:
+        #     for i, c in enumerate(countries):
+        #         sub = f[f["country"] == c]
+        #         ax.scatter(sub[distance_col], sub["delta"], s=point_size, alpha=alpha,
+        #                    edgecolors="white", linewidths=0.4, zorder=2 + i, **style[c])
         if color_per_country:
-            for i, c in enumerate(countries):
-                sub = f[f["country"] == c]
-                ax.scatter(sub[distance_col], sub["delta"], s=point_size, alpha=alpha,
-                           edgecolors="white", linewidths=0.4, zorder=2 + i, **style[c])
+            sub = f[f["country"].isin(countries)].sample(frac=1, random_state=123) # just to get better overlap
+            for _, r in sub.iterrows():
+                ax.scatter(r[distance_col], r["delta"], s=point_size, alpha=alpha,
+                           edgecolors="white", linewidths=0.4, zorder=2, **style[r["country"]])
         else:
             ax.scatter(f[distance_col], f["delta"], s=point_size, alpha=alpha,
                        color=color, edgecolors="white", linewidths=0.4, zorder=2)
 
-        ax.axhline(0, color="#888", linewidth=0.8, linestyle="--", zorder=0)
-        ax.set_ylabel(f"Δ {metric_name(rc['metric'])}\n(PO+PA − PA)", fontsize=10)
+        ax.axhline(0, color="#988", linewidth=1, linestyle="--", zorder=0)
+        ax.set_ylabel(f"Δ {metric_name(rc['metric'])}\n(PO&PA − PA)", fontsize=10)
         ax.spines[["top", "right"]].set_visible(False)
         ax.grid(axis="y", linestyle="--", linewidth=0.5, alpha=0.6)
         ax.set_axisbelow(True)
 
-    axes[-1, 0].set_xlabel(distance_col, fontsize=10)
+    for ax in axes[0, :]:
+        ax.set_xlabel('Distance (km)', fontsize=10)
+
+    # y range
+    min_y = min(f["delta"].min() for f in frames) - 0.05
+    max_y = max(f["delta"].max() for f in frames) + 0.05
+    for ax in axes[0, :]:
+        ax.set_ylim(min_y, max_y)
 
     # --- 4. Single legend, centred below the figure -------------------------
     if color_per_country:
@@ -1236,9 +1261,11 @@ def plot_metric_delta_vs_distance_scatter(
                           markeredgecolor="white", markeredgewidth=0.4,
                           markerfacecolor=style[c]["color"], marker=style[c]["marker"])
                    for c in countries]
-        fig.legend(handles=handles, loc="outside lower center",
-                   ncol=len(countries), frameon=False, fontsize=8,
-                   handletextpad=0.2, columnspacing=1.2)
+        leg = fig.legend(handles=handles, bbox_to_anchor=(0.5, -0.04), loc="upper center",
+                         ncol=len(countries), frameon=True, fancybox=False, fontsize=9,
+                         handletextpad=0.3, columnspacing=1.5,
+                         borderpad=0.5, edgecolor="#cccccc")
+        leg.get_frame().set_linewidth(0.6)
 
     fig.savefig(out_path, dpi=350, bbox_inches="tight")
     fig.savefig(out_path.rsplit(".", 1)[0] + ".svg", bbox_inches="tight", facecolor="none")
@@ -1381,7 +1408,7 @@ if __name__ == "__main__":
         winner_runs[split_type] = {}
         df = pd.read_csv(os.path.join(output_dir_for(split_type), "summary_common.csv"))
         df['source'] = df['source'].map(SOURCE_REMAP)
-        df[HARMONIC_COL] = _harmonic_mean(df["avg_auc_species"], df["avg_auc_site"])
+        df[HARMONIC_COL] = harmonic_mean(df["avg_auc_species"], df["avg_auc_site"])
         for source in ["PO only", "PA only", "PO + PA"]:
             source_df = df[df['source'] == source]
             # average the harmonic mean across all options for each run

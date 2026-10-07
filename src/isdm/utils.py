@@ -11,11 +11,11 @@ def haversine_tree(lonlat: np.ndarray) -> BallTree:
     """BallTree on (N, 2) [lon, lat] points in degrees."""
     return BallTree(np.radians(np.asarray(lonlat)[:, ::-1]), metric="haversine")
 
-
-def nearest_km(tree: BallTree, lonlat: np.ndarray) -> np.ndarray:
+def nearest_km(tree: BallTree, lonlat: np.ndarray, return_index: bool = False):
     """Great-circle distance (km) from each [lon, lat] point to its nearest point in `tree`."""
-    dist_rad, _ = tree.query(np.radians(np.asarray(lonlat)[:, ::-1]), k=1)
-    return dist_rad[:, 0] * EARTH_RADIUS_KM
+    dist_rad, idx = tree.query(np.radians(np.asarray(lonlat)[:, ::-1]), k=1)
+    dist_km = dist_rad[:, 0] * EARTH_RADIUS_KM
+    return (dist_km, idx[:, 0]) if return_index else dist_km
 
 
 def set_all_seeds(seed: int):

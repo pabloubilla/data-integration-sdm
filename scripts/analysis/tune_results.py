@@ -121,6 +121,14 @@ def _plot_range_panels(panels: list, target, out: Path, cmap_name="Blues"):
         "max":  dict(color=cmap(0.95), linestyle="-", linewidth=2, marker="D", markersize=6, alpha=1.0, zorder=4),
     }
 
+    title_map = {
+        'closest': 'close',
+        'medium': 'middle',
+        'farthest': 'far',
+        'average': 'average',
+    }
+
+
     fig, axes = plt.subplots(1, len(panels), figsize=(4 * len(panels), 3.4), squeeze=False, sharey="row")
     for j, (label, sub, param) in enumerate(panels):
         ax = axes[0][j]
@@ -128,18 +136,18 @@ def _plot_range_panels(panels: list, target, out: Path, cmap_name="Blues"):
         x = agg.index.astype(str)
         for stat in ("min", "mean", "max"):
             ax.plot(x, agg[stat], label=stat, **style[stat])
-        ax.set_title(label, fontsize=10, fontweight="bold")
+        ax.set_title(title_map.get(label, label), fontsize=12, fontweight="bold")
         ax.grid(alpha=0.25, linewidth=0.5)
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
         if j == 0:
-            ax.set_ylabel('Harmonic mean AUC', fontsize=9)
+            ax.set_ylabel('Harmonic mean AUC', fontsize=12)
         if j == len(panels) - 1:
             ax.legend(fontsize=8, frameon=False)
     
     # x axis
     for ax in axes[0]:
-        ax.set_xlabel("$w_{PO}$", fontsize=9)
+        ax.set_xlabel("$w_{PO}$", fontsize=12)
 
     plt.tight_layout()
     plt.savefig(out, dpi=200)

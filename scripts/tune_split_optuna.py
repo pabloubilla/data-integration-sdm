@@ -3,7 +3,7 @@ Optuna-based hyperparameter search over a single test_number.
 Replaces the exhaustive grid with TPE sampling + pruning.
 
 Usage:
-    python scripts/tune_split.py --test_number 0 --n_trials 60
+    python scripts/pipeline/03_tune_split.py --test_number 0 --n_trials 60
 """
 
 import argparse

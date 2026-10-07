@@ -214,14 +214,14 @@ def plot_paper_splits_figure(
     # narrow spacer column between the two 3-column blocks so they read as
     # visually distinct groups; grid_cols maps col_defs index -> gridspec column
     grid_cols = [2, 3, 4, 6, 7, 8]
-    width_ratios = [po_width_ratio, po_gap_ratio, 1, 1, 1, 0.2, 1, 1, 1]
+    width_ratios = [po_width_ratio, po_gap_ratio, 1, 1, 1, 0.3, 1, 1, 1]
     ncols_grid = len(width_ratios)
 
 
     height_ratios = [1] * n_rows_data
     nrows_grid = len(height_ratios)
 
-    fig = plt.figure(figsize=(2.1 * len(col_defs) + 3, 1.7 * n_rows_data))
+    fig = plt.figure(figsize=(2.1 * len(col_defs) + 3, 1.4 * n_rows_data))
     gs = fig.add_gridspec(nrows_grid, ncols_grid, wspace=0.05, hspace=0.09,
                            width_ratios=width_ratios, height_ratios=height_ratios)
 
@@ -231,7 +231,7 @@ def plot_paper_splits_figure(
     _style_axis(po_ax, x_lim, y_lim, use_cartopy)
     po_kw = {"transform": ccrs.PlateCarree()} if use_cartopy else {}
     po_ax.scatter(X_po_plot[:, 0], X_po_plot[:, 1],
-                  c=COLOR_MAP["po"], s=.05, alpha=0.3, linewidths=0, zorder=1, **po_kw)
+                  c=COLOR_MAP["po"], s=.1, alpha=0.3, linewidths=0, zorder=1, **po_kw)
     # title above reads awkwardly on a tall narrow panel — put it as an
     # ylabel-style rotated text instead, or keep as a wrapped title
     # po_ax.set_title(LEGEND_LABEL_PO + "\n(constant across\nall splits)", fontsize=10)
@@ -261,14 +261,17 @@ def plot_paper_splits_figure(
                 perm = perm_rng.permutation(len(combined_idx))
 
                 ax.scatter(X_pa[combined_idx[perm], 0], X_pa[combined_idx[perm], 1],
-                           c=combined_colors[perm], s=8, linewidths=0, zorder=2, **ax_kw)
+                           c=combined_colors[perm], s=1.2, linewidths=0, alpha=0.7, zorder=2, **ax_kw)
 
             if row == 0:
-                ax.set_title(BAND_LABEL[option], fontsize=13)
+                ax.set_title(BAND_LABEL[option], fontsize=12)
                 top_row_axes[col] = ax
             if col == 0:
-                ax.text(-0.05, 0.5, f"$k={row+1}$", transform=ax.transAxes,
-                        rotation=90, va="center", ha="center", fontsize=13)
+                ax.text(-0.07, 0.5, f"$k={geo_split_list[row]+1}$", transform=ax.transAxes,
+                        rotation=90, va="center", ha="center", fontsize=12)
+            if col == 3:
+                ax.text(-0.07, 0.5, f"$k={env_split_list[row]+1}$", transform=ax.transAxes,
+                        rotation=90, va="center", ha="center", fontsize=12)
 
 
     # shared legend — bbox_to_anchor gives direct control over its
@@ -282,17 +285,19 @@ def plot_paper_splits_figure(
                markersize=10, label=LEGEND_LABEL_TRAIN),
     ]
     fig.legend(handles=legend_elems, loc="center right", bbox_to_anchor=(0.98, 0.5),
-           ncol=1, fontsize=13, frameon=True)
+           ncol=1, fontsize=12, frameon=True)
     fig.subplots_adjust(left=0.05, right=0.88, top=0.92, bottom=0.05)
 
-    for block_name, cols in (("Geographical", [0, 1, 2]), ("Environmental", [3, 4, 5])):
-        lefts = [top_row_axes[c].get_position().x0 for c in cols]
-        rights = [top_row_axes[c].get_position().x1 for c in cols]
-        top = max(top_row_axes[c].get_position().y1 for c in cols)
-        mid_x = (min(lefts) + max(rights)) / 2
-        fig.text(mid_x, top + 0.07, block_name, ha="center", va="bottom",
-                  fontsize=13, fontweight="bold")
-
+    for block_name, mid_col in (("Geographical", 1), ("Environmental", 4)):
+        mid_title = top_row_axes[mid_col].title
+        top_row_axes[mid_col].annotate(
+            block_name,
+            xy=(0.5, 1.0), xycoords=mid_title,      # top-center of the band title
+            xytext=(0, 4), textcoords="offset points",
+            ha="center", va="bottom",
+            fontsize=12, fontweight="bold",
+            annotation_clip=False,
+        )
 
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -304,15 +309,15 @@ def plot_paper_splits_figure(
 
 def main():
     from isdm.load_data import load_geoplant_processed  # local import: only needed for the CLI entry point
-
-    regions = ["france", "denmark", "bene", "sparse_pa"]
-
+ 
+    # regions = ["france", "denmark", "bene", "sparse_pa"] # for supporting information in the paper
+    regions = ["france"]  # for main figure
 
     for region in regions:
 
         data_path = f"data/processed/GeoPlant/{region}"
         split_dir = Path(f"outputs/splits/GeoPlant/{region}_bands")
-        output_path = Path(f"outputs/figures/splits_maps_{region}.png")
+        
 
 
         data = load_geoplant_processed(data_path, add_coordinates=True)
@@ -321,14 +326,27 @@ def main():
 
         specs_geo = load_saved_specs(split_dir / "geographical")
         specs_env = load_saved_specs(split_dir / "environmental")
+ 
+        # for supporting information, we can show all 10 anchors (k=1..10) for each split type
+        geo_split_list = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+        env_split_list = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+
+        # for main figure, selected anchors that are visually distinct
+        geo_split_list = [0, 3, 7]
+        env_split_list = [1, 5, 9]
+
+        len_geo = len(pick_example_anchors(specs_geo, geo_split_list))
+        len_env = len(pick_example_anchors(specs_env, env_split_list))
+
+        output_path = Path(f"outputs/figures/splits_maps_{region}_{len_geo}.png")
 
         plot_paper_splits_figure(
             X_pa=X_pa,
             X_po=X_po,
             geo_specs=specs_geo,
             env_specs=specs_env,
-            geo_split_list=[0, 1, 2],
-            env_split_list=[0, 1, 2],
+            geo_split_list=geo_split_list,
+            env_split_list=env_split_list,
             output_path=output_path,
             region=region
         )

@@ -165,7 +165,7 @@ def plot_auc_vs_distance(df, path, log_x=True):
 
 def plot_delta_vs_distance(df, path, log_x=True):
     fig, ax = plt.subplots(figsize=(6, 5))
-    ax.scatter(df["distance_to_po_km"], df["delta_auc"], s=4, alpha=0.15, c="#B2182B")
+    ax.scatter(df["distance_to_po_km"], df["delta_auc"], s=1, alpha=0.15, c="#B2182B")
     ax.axhline(0, color="gray", linewidth=1, linestyle="--")
     if log_x:
         ax.set_xscale("log")
@@ -176,6 +176,25 @@ def plot_delta_vs_distance(df, path, log_x=True):
     plt.close(fig)
 
 
+def plot_auc_with_both_distances(df, path, log_scale=True):
+    fig, ax = plt.subplots(figsize=(6, 5))
+    if log_scale:
+        df['distance_to_pa_train_km_log'] = np.log10(df['distance_to_pa_train_km'] + 1e-6)
+        sc = ax.scatter(df["distance_to_po_km"], df["site_auc"], s=.2, alpha=1,
+                        c=df["distance_to_pa_train_km_log"], cmap="magma", vmin=df["distance_to_pa_train_km_log"].min(), vmax=df["distance_to_pa_train_km_log"].max())
+    else:   
+        sc = ax.scatter(df["distance_to_po_km"], df["site_auc"], s=1, alpha=0.2,
+                    c=df["distance_to_pa_train_km"], cmap="magma", vmin=0, vmax=df["distance_to_pa_train_km"].max())
+    if log_scale:
+        ax.set_xscale("log")
+    ax.set_xlabel("distance to nearest PO record (km)")
+    ax.set_ylabel("site-level AUC")
+    cbar = plt.colorbar(sc, ax=ax)
+    cbar.set_label("distance to nearest PA train record (km)")
+    fig.tight_layout()
+    fig.savefig(path / "po_distance_analysis_with_pa_distance.png", dpi=200)
+    plt.close(fig)
+
 def main():
     args = parse_args()
     best = load_best_params(args)
@@ -184,7 +203,8 @@ def main():
 
     data = load_geoplant_processed(args.data_path, add_coordinates=True)
     covariates = [c for c in data.covariates if c not in COORD_COLS]
-    po_tree = haversine_tree(data.X_po[COORD_COLS].dropna().to_numpy())
+    po_lonlat = data.X_po[COORD_COLS].dropna().to_numpy()
+    po_tree = haversine_tree(po_lonlat)
 
     splits = load_split_specs(args.split_dir)
     splits = splits[~splits["option"].str.contains("val", case=False, na=False)]
@@ -215,6 +235,8 @@ def main():
         lonlat_pa_test = s["X_test"][COORD_COLS].to_numpy()[aucs.index.to_numpy(dtype=int)]
         lonlat_pa_train = s["X_train"][COORD_COLS].to_numpy()
         pa_train_tree = haversine_tree(lonlat_pa_train)
+
+
         results.append(pd.DataFrame({
             "split_id": split_row["split_id"],
             "option": split_row["option"],
@@ -235,6 +257,7 @@ def main():
     df.to_csv(out_dir / f"po_distance_analysis.csv", index=False)
     plot_auc_vs_distance(df, out_dir)
     plot_delta_vs_distance(df, out_dir)
+    plot_auc_with_both_distances(df, out_dir)
 
     print(f"Saved -> {out_dir}")
 

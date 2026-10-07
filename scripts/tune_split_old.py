@@ -14,7 +14,7 @@ Results are saved as:
         best_popa.csv          ← best param combo per (loss combo, option)
 
 Usage:
-    python scripts/tune_split.py --test_number 0
+    python scripts/pipeline/03_tune_split.py --test_number 0
 """
 
 import argparse

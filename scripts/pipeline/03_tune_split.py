@@ -2,14 +2,14 @@
 Runs the validation-tuning grid search for PA, PO, and/or POPA, saving
 ONE JSON PER TRIAL under output_dir/trials_<method>/. This script only
 RUNS trials — it does not build summary CSVs. Run
-scripts/aggregate_tune_results.py afterwards (or anytime, even while this
+scripts/pipeline/04_aggregate_tune_split.py afterwards (or anytime, even while this
 is still running on the cluster) to build those.
 
 Resumable: re-running this exact command skips any trial that already
 has a saved result file.
 
 Usage:
-    python scripts/tune_split.py --test_number 0
+    python scripts/pipeline/03_tune_split.py --test_number 0
 """
 import os
 import argparse
@@ -27,8 +27,8 @@ from isdm.tune import run_grid_search, build_trial_combos
 # ─────────────────────────────────────────────
 #  Which methods to run
 # ─────────────────────────────────────────────
-RUN_PA = True
-RUN_PO = True
+RUN_PA = False
+RUN_PO = False
 RUN_POPA = True
 
 # MAX_WORKERS = 16   # 1 = sequential. Set based on what timing experiment showed.
@@ -41,7 +41,7 @@ VAL_PATIENCE = 5
 # ─────────────────────────────────────────────
 #  PA
 # ─────────────────────────────────────────────
-N_TRIALS_PA = 250
+# N_TRIALS_PA = 250
 PARAM_GRID_PA = {
     "lr":            [5e-3, 1e-3, 5e-4, 1e-4],
     "weight_decay":  [1e-3, 1e-4, 1e-5, 0],
@@ -54,7 +54,7 @@ LOSS_NAMES_PA = ["bce", "balanced_bce"]
 # ─────────────────────────────────────────────
 #  PO
 # ─────────────────────────────────────────────
-N_TRIALS_PO = 250
+# N_TRIALS_PO = 250
 PARAM_GRID_PO = {
     "lr":            [5e-3, 1e-3, 5e-4, 1e-4],
     "weight_decay":  [1e-3, 1e-4, 1e-5, 0],
@@ -67,7 +67,7 @@ LOSS_NAMES_PO = ["deep_maxent", "balanced_bce", "bce"]
 # ─────────────────────────────────────────────
 #  POPA
 # ─────────────────────────────────────────────
-N_TRIALS_POPA = 250
+# N_TRIALS_POPA = 250
 PARAM_GRID_POPA = {
     "lr":            [5e-3, 1e-3, 5e-4, 1e-4],
     "weight_decay":  [1e-3, 1e-4, 1e-5, 0],
@@ -76,12 +76,13 @@ PARAM_GRID_POPA = {
     "batch_size":    [50,100,200,500,1000],
 }
 LOSS_COMBOS_POPA = [
-    ("deep_maxent", "balanced_bce_ippp"),
-    ("deep_maxent", "balanced_bce"),
-    ("deep_maxent", "bce"),
-    ("deep_maxent", "bce_ippp"),
-    ("balanced_bce", "balanced_bce"),
-    ("deep_maxent", "deep_maxent"),
+    # ("deep_maxent", "balanced_bce_ippp"),
+    # ("deep_maxent", "balanced_bce"),
+    # ("deep_maxent", "bce"),
+    # ("deep_maxent", "bce_ippp"),
+    # ("balanced_bce", "balanced_bce"),
+    ("bce", "bce")
+    # ("deep_maxent", "deep_maxent"),
 ]
 W_PA_PO_PAIRS = [
     (0.0, 1.0),
@@ -100,7 +101,7 @@ W_PA_PO_PAIRS = [
 FIXED = {"seed": 42}
 
 
-def main(test_number: int, dataset: str, split_type: str, region: str):
+def main(test_number: int, dataset: str, split_type: str, region: str, n_trials: int):
     set_all_seeds(FIXED["seed"])
 
     data_path = f"data/processed/{dataset}/{region}"
@@ -140,7 +141,7 @@ def main(test_number: int, dataset: str, split_type: str, region: str):
     if RUN_PA:
         print("\n" + "█" * 60 + "\n  PA-ONLY\n" + "█" * 60)
         combos_pa = build_trial_combos(
-            method="pa", param_grid=PARAM_GRID_PA, n_trials=N_TRIALS_PA,
+            method="pa", param_grid=PARAM_GRID_PA, n_trials=n_trials,
             loss_names=LOSS_NAMES_PA, seed=FIXED["seed"],
         )
         run_grid_search(
@@ -157,7 +158,7 @@ def main(test_number: int, dataset: str, split_type: str, region: str):
     if RUN_PO:
         print("\n" + "█" * 60 + "\n  PO-ONLY\n" + "█" * 60)
         combos_po = build_trial_combos(
-            method="po", param_grid=PARAM_GRID_PO, n_trials=N_TRIALS_PO,
+            method="po", param_grid=PARAM_GRID_PO, n_trials=n_trials,
             loss_names=LOSS_NAMES_PO, seed=FIXED["seed"],
         )
         run_grid_search(
@@ -174,7 +175,7 @@ def main(test_number: int, dataset: str, split_type: str, region: str):
     if RUN_POPA:
         print("\n" + "█" * 60 + "\n  PO+PA\n" + "█" * 60)
         combos_popa = build_trial_combos(
-            method="popa", param_grid=PARAM_GRID_POPA, n_trials=N_TRIALS_POPA,
+            method="popa", param_grid=PARAM_GRID_POPA, n_trials=n_trials,
             loss_combos=LOSS_COMBOS_POPA, w_pa_po_pairs=W_PA_PO_PAIRS, seed=FIXED["seed"],
         )
         tunable_keys_popa = list(PARAM_GRID_POPA.keys()) + ["loss_po_name", "loss_pa_name", "w_pa", "w_po"]
@@ -190,7 +191,7 @@ def main(test_number: int, dataset: str, split_type: str, region: str):
         )
 
     print(f"\nAll trial results saved under: {output_dir}")
-    print("Run scripts/aggregate_tune_results.py to build summary CSVs.")
+    print("Run scripts/pipeline/04_aggregate_tune_split.py to build summary CSVs.")
 
 
 if __name__ == "__main__":
@@ -199,5 +200,6 @@ if __name__ == "__main__":
     parser.add_argument("--dataset", type=str, default="GeoPlant")
     parser.add_argument("--split_type", type=str, default="geographical")
     parser.add_argument("--region", type=str, default="france")
+    parser.add_argument("--n_trials", type=int, default=250)
     args = parser.parse_args()
-    main(args.test_number, args.dataset, args.split_type, args.region)
+    main(args.test_number, args.dataset, args.split_type, args.region, args.n_trials)

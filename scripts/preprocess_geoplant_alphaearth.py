@@ -1,4 +1,4 @@
-# scripts/preprocess_geoplant.py
+# scripts/pipeline/01_preprocess_geoplant.py
 
 import argparse
 import json

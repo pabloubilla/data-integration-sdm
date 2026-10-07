@@ -1,5 +1,5 @@
 """
-Plots for grid search results produced by scripts/tune_split.py.
+Plots for grid search results produced by scripts/pipeline/03_tune_split.py.
 
 Reads a summary_*.csv (e.g. outputs/tune/test_1/summary_popa.csv) and
 produces a handful of standard diagnostic plots into an output folder:

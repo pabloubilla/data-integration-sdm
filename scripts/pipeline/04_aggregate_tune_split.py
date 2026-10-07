@@ -2,7 +2,7 @@
 Aggregate tuning results from a directory of trials.
 
 Usage:
-    python scripts/aggregate_tune_results.py \
+    python scripts/pipeline/04_aggregate_tune_split.py \
         --tune_dir outputs/tune/GeoPlant/france/geographical/test_0
 """
 

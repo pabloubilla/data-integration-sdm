@@ -8,8 +8,10 @@ authors = [
 ]
 requires-python = ">=3.11"
 dependencies = [
+    "cartopy>=0.26.0",
     "cvxpy>=1.9.3",
     "geopandas>=1.2.0",
+    "geopy>=2.5.0",
     "joblib>=1.6.0",
     "k-means-constrained>=0.9.1",
     "matplotlib>=3.11.2",
@@ -18,8 +20,10 @@ dependencies = [
     "rasterio>=1.4.4",
     "scikit-learn>=1.9.1",
     "scipy>=1.17.1",
+    "seaborn>=0.13.2",
     "torch>=2.14.0",
     "tqdm>=4.70.1",
+    "wandb>=0.30.0",
 ]
 
 [build-system]

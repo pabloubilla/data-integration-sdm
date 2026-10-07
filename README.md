@@ -58,14 +58,14 @@ This sweeps over datasets (`GeoPlant`), split types (`environmental`, `geographi
 1. **Preprocess** the GeoPlant dataset (BioClim or AlphaEarth features):
 
 ```bash
-   uv run scripts/preprocess_geoplant.py --vocab-mode intersection_po_pa
+   uv run scripts/pipeline/01_preprocess_geoplant.py --vocab-mode intersection_po_pa
    uv run scripts/preprocess_geoplant_alphaearth.py --vocab-mode intersection_po_pa
 ```
 
 2. **Generate presence-absence splits**:
 
 ```bash
-   uv run scripts/generate_pa_splits_v2.py --dataset_name GeoPlant --split_type geographical
+   uv run scripts/pipeline/02_generate_pa_splits.py --dataset_name GeoPlant --split_type geographical
 ```
    - `--dataset_name`: dataset to use (default `GeoPlant`)
    - `--split_type`: `geographical` or `environmental` (default `geographical`)

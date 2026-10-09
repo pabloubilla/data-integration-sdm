@@ -16,6 +16,7 @@ dependencies = [
     "k-means-constrained>=0.9.1",
     "matplotlib>=3.11.2",
     "pandas>=3.0.6",
+    "pyarrow>=25.0.1",
     "pyyaml>=6.0.3",
     "rasterio>=1.4.4",
     "scikit-learn>=1.9.1",

@@ -280,6 +280,7 @@ def main(dataset_name: str = "GeoPlant",
     y_pa = data.y_pa_train
     covariates = data.covariates
 
+
     # covs_cluster = [c for c in ["x", "y", "lon", "lat"] if c in X_pa.columns]
     # if not covs_cluster:
     #     covs_cluster = covariates

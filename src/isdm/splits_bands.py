@@ -223,7 +223,7 @@ def plot_band_assignment(
 
 def partition_sweep_bands(
     X_pa: pd.DataFrame,
-    y_pa: pd.DataFrame,
+    y_pa: list[str], #pd.DataFrame,
     covs_cluster: list[str],
     covs_distance: list[str],
     n_bins_per_axis: int = 30,
@@ -235,6 +235,7 @@ def partition_sweep_bands(
     plot: bool = False,
     reserve_validation: bool = True,
     val_proportion: float = 0.1,
+    grid_before_scaling: bool = False,
 ) -> list[SplitSpec]:
     """
     Sweep n_anchors, each producing a test/closest/middle/farthest band split.
@@ -256,13 +257,21 @@ def partition_sweep_bands(
 
 
 
+    if grid_before_scaling:
+            # assign each point to a grid cell, which becomes a cluster. The grid is defined by the covariates used for clustering.
+        labels, grid_info = make_grid_clusters(X, covariates=covs_cluster, n_bins_per_axis=n_bins_per_axis)
 
     scaler = StandardScaler()
     X[covs_distance] = scaler.fit_transform(X[covs_distance])
 
+    if not grid_before_scaling:
+        # assign each point to a grid cell, which becomes a cluster. The grid is defined by the covariates used for clustering.
+        labels, grid_info = make_grid_clusters(X, covariates=covs_cluster, n_bins_per_axis=n_bins_per_axis)
+
     D = compute_distance_matrix(X, covariates=covs_distance, metric=distance_metric)
-    # assign each point to a grid cell, which becomes a cluster. The grid is defined by the covariates used for clustering.
-    labels, grid_info = make_grid_clusters(X, covariates=covs_cluster, n_bins_per_axis=n_bins_per_axis)
+
+
+
     print(f"Assigned {n} points to {len(grid_info)} grid cells.")
 
     cluster_ids, centroids = compute_cluster_centroids(X, labels, covariates=covs_distance)

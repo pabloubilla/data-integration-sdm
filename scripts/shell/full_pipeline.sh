@@ -30,9 +30,9 @@ echo
 # ─────────────────────────────────────────────
 RUN_PREPROCESS=false
 RUN_GENERATE_SPLITS=false
-RUN_TUNE=true
-RUN_AGGREGATE_TUNE=false
-RUN_FINAL_SWEEP=false
+RUN_TUNE=false
+RUN_AGGREGATE_TUNE=true
+RUN_FINAL_SWEEP=true
 
 # ─────────────────────────────────────────────
 #  Axes of variation
@@ -42,7 +42,7 @@ split_types=("environmental" "geographical")   # one pipeline per entry, each on
 regions=("france")
 overlap_flags=("--use_overlapping_species")
 n_anchors=10
-n_trials=100
+n_trials=60
 
 N_GPUS=2
 N_CONCURRENT=${#split_types[@]}

@@ -178,6 +178,7 @@ def _execute_trial(
     if results_dir is not None:
         existing = load_existing_trial(results_dir, tid)
         if existing is not None:
+            print(f"[skip] {tid} already on disk")
             return existing
 
     param_kwargs = {k: combo[k] for k in param_keys if k in combo}

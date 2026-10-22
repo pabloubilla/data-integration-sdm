@@ -1,259 +1,256 @@
 """
-Runs regression + RF importance + line plots for PA, PO, and POPA in one go.
+Hyperparameter sensitivity figures from the validation tuning runs.
 
-    python analyze_tune.py --dataset GeoPlant --region france --split_type geographical --test_number 0
-    python analyze_tune.py --tune_dir outputs/tune/GeoPlant/france/geographical/test_0
+  w_po_by_distance_<split>   w_PO sensitivity per distance (main text)
+  hyperparams_<split>        min/mean/max per hyperparameter value over all other
+                                 hyperparameters, selected loss of each method (appendix)
+  loss_tuning_<split> (+ .csv)   spread over configurations for every loss (appendix)
 
-Writes everything under tune_dir/analysis/{method}/{regression,plots}/.
+Scores are averaged over the close/medium/far validation splits (the model selection
+criterion), except in the per-distance panels of the w_PO figure.
+
+Figures go to --out_dir (default outputs/figures/tuning) and to tune_dir/figures, as .png and .pdf.
+
+Usage:
+    python tune_results.py --split_type geographical
+    python tune_results.py --split_type environmental
+    python tune_results.py --tune_dir outputs/tune/GeoPlant/france/geographical/test_0
 """
-
 import argparse
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from sklearn.linear_model import LinearRegression
-from sklearn.preprocessing import StandardScaler
-from sklearn.ensemble import RandomForestRegressor
 
 TARGET = "harmonic_mean_auc"
-GROUP_COLS = {
+OPTIONS = ("closest_val", "middle_val", "farthest_val")
+LOSS_COLS = {
     "pa": ["param_loss_name"],
     "po": ["param_loss_name"],
     "popa": ["param_loss_po_name", "param_loss_pa_name"],
 }
-EXCLUDE_COLS = {"param_w_pa"}          # redundant with param_w_po (w_pa = 1 - w_po)
-EXCLUDE_WPO_EDGES = False               # drop w_po in {0, 1} (single-source degenerate cases)
-BEST_LOSS_COMBO = ("deep_maxent", "bce_ippp")   # pick from your best_popa_avg_over_distance.csv
-OPTIONS_ORDER = ("closest_val", "middle_val", "farthest_val")
+BEST_LOSS = {  # selected loss per method (Table 2)
+    "pa": ("bce",),
+    "po": ("balanced_bce",),
+    "popa": ("deep_maxent", "bce_ippp"),
+}
+DROP_WPO_EDGES = True  # w_po in {0, 1} are single-source models: left out of the appendix figures
+
+METHOD_LABELS = {"pa": "PA only", "po": "PO only", "popa": "PO & PA"}
+LOSS_LABELS = {
+    "bce": "BCE", "balanced_bce": "Bal. BCE", "deep_maxent": "DeepMaxent",
+    "bce_ippp": "BCE (IPP)", "balanced_bce_ippp": "Bal. BCE (IPP)",
+}
+PARAM_LABELS = {
+    "param_lr": "Learning rate",
+    "param_weight_decay": "Weight decay",
+    "param_hidden_dim": "Hidden layer size",
+    "param_hidden_layers": "Hidden layers",
+    "param_batch_size": "Batch size",
+    "param_w_po": "$w_{PO}$",
+}
+DISTANCE_LABELS = {"closest": "close", "middle": "medium", "farthest": "far", "average": "average"}
+YLABEL = "Harmonic mean AUC"
+
+CMAP = plt.get_cmap("Blues")
+RANGE_STYLE = {
+    "min":  dict(color=CMAP(0.40), linestyle=":",  linewidth=1.6, marker="o", markersize=4, zorder=2),
+    "mean": dict(color=CMAP(0.65), linestyle="--", linewidth=1.8, marker="s", markersize=5, zorder=3),
+    "max":  dict(color=CMAP(0.95), linestyle="-",  linewidth=2.0, marker="D", markersize=6, zorder=4),
+}
 
 
-def _group_label(key) -> str:
-    return "_".join(map(str, key)) if isinstance(key, tuple) else str(key)
+# ---------------------------------------------------------------------------
+# Data
+# ---------------------------------------------------------------------------
+def param_cols(df):
+    return [c for c in df.columns if c.startswith("param_") and c != "param_w_pa"]  # w_pa = 1 - w_po
 
 
-def _design_matrix(df, covariates):
-    X_raw = df[covariates]
-    numeric = [c for c in covariates if pd.api.types.is_numeric_dtype(X_raw[c]) and df[c].nunique() > 1]
-    categorical = [c for c in covariates if c not in numeric and df[c].nunique() > 1]
-
-    parts, names = [], []
-    if numeric:
-        parts.append((numeric, X_raw[numeric].values))
-        names += [c.replace("param_", "") for c in numeric]
-    if categorical:
-        dummies = pd.get_dummies(X_raw[categorical], drop_first=False)
-        parts.append((categorical, dummies.values.astype(float)))
-        names += list(dummies.columns)
-    return parts, names, numeric
+def hyperparams(df, method):
+    return [c for c in param_cols(df) if c not in LOSS_COLS[method]]
 
 
-def _fit_regression(df, covariates, target):
-    parts, names, numeric = _design_matrix(df, covariates)
-    if not parts:
-        return pd.Series(dtype=float), float("nan")
-
-    mats = [StandardScaler().fit_transform(v) if cols == numeric else v for cols, v in parts]
-    X = np.concatenate(mats, axis=1)
-    y = df[target].values
-    y_std = (y - y.mean()) / (y.std() or 1)
-
-    model = LinearRegression().fit(X, y_std)
-    r2 = model.score(X, y_std)
-    coefs = pd.Series(model.coef_, index=names).sort_values()
-    return coefs, r2
+def load(tune_dir: Path, method: str):
+    path = tune_dir / f"summary_{method}.csv"
+    if not path.exists():
+        print(f"[{method}] {path} not found, skipping.")
+        return None
+    df = pd.read_csv(path)
+    for c in param_cols(df):
+        if pd.api.types.is_float_dtype(df[c]):
+            df[c] = df[c].round(10)  # float noise would split configurations
+    return df[df["option"].isin(OPTIONS)]
 
 
-def _fit_rf(df, covariates, target, n_estimators=300, max_depth=4, seed=0):
-    parts, names, _ = _design_matrix(df, covariates)
-    if not parts:
-        return pd.Series(dtype=float), float("nan")
+def check(df, method):
+    """Quick counts: rows, failures, duplicates, configurations per loss and pairing."""
+    hp = hyperparams(df, method)
+    loss = df[LOSS_COLS[method]].astype(str).agg(" + ".join, axis=1)
+    config = df[hp].astype(str).agg("|".join, axis=1)
+    n_dup = pd.DataFrame({"l": loss, "c": config, "o": df["option"]}).duplicated().sum()
+    per_loss = config.groupby(loss).nunique()
+    n_all = (loss.groupby(config).nunique() == loss.nunique()).sum()
 
-    X = np.concatenate([v for _, v in parts], axis=1)
-    y = df[target].values
-
-    rf = RandomForestRegressor(n_estimators=n_estimators, max_depth=max_depth,
-                                oob_score=True, random_state=seed)
-    rf.fit(X, y)
-    importances = pd.Series(rf.feature_importances_, index=names).sort_values(ascending=False)
-    return importances, rf.oob_score_
-
-
-def _run_per_group(df, covariates, target, group_cols, fit_fn):
-    if not group_cols:
-        return {"all": fit_fn(df, covariates, target)}
-    return {_group_label(key): fit_fn(sub, covariates, target) for key, sub in df.groupby(group_cols)}
+    print(f"[{method}] {len(df)} rows | {df['option'].nunique()} distance(s) | "
+          f"{df[TARGET].isna().sum()} failed | {n_dup} duplicate rows")
+    print(f"[{method}]   configs per loss: " + ", ".join(f"{l}={n}" for l, n in per_loss.items()))
+    print(f"[{method}]   configs run for all {loss.nunique()} losses: {n_all}")
 
 
-def plot_importance(results: dict, out: Path):
-    fig, axes = plt.subplots(1, len(results), figsize=(4.5 * len(results), 4), squeeze=False)
-    for ax, (label, (importances, oob_r2)) in zip(axes[0], results.items()):
-        importances.sort_values().plot.barh(ax=ax, color="#4C72B0")
-        ax.set_title(f"{label}\nOOB R²={oob_r2:.2f}", fontsize=9)
-        ax.set_xlabel("importance")
-    plt.tight_layout()
-    plt.savefig(out, dpi=150)
+def average_over_distance(df):
+    """One row per configuration. Configurations missing a distance are dropped."""
+    out = (df.dropna(subset=[TARGET])
+             .groupby(param_cols(df), dropna=False)
+             .agg(score=(TARGET, "mean"), n=("option", "nunique"))
+             .reset_index())
+    out = out[out["n"] == df["option"].nunique()]
+    return out.drop(columns="n").rename(columns={"score": TARGET})
+
+
+def select_loss(df, method, loss):
+    mask = np.ones(len(df), dtype=bool)
+    for col, name in zip(LOSS_COLS[method], loss):
+        mask &= (df[col] == name).values
+    if not mask.any():
+        print(f"[{method}] loss {loss} not found. Available:\n"
+              f"{df[LOSS_COLS[method]].drop_duplicates().to_string(index=False)}")
+    return df[mask]
+
+
+def drop_wpo_edges(df):
+    if DROP_WPO_EDGES and "param_w_po" in df.columns:
+        return df[(df["param_w_po"] > 0) & (df["param_w_po"] < 1)]
+    return df
+
+
+# ---------------------------------------------------------------------------
+# Plot helpers
+# ---------------------------------------------------------------------------
+def param_label(param):
+    return PARAM_LABELS.get(param, param.replace("param_", "").replace("_", " ").capitalize())
+
+
+def loss_label(loss):
+    names = [LOSS_LABELS.get(name, name) for name in loss]
+    if len(names) == 2 and names[0] == names[1]:
+        return f"{names[0]} (both)"
+    return " + ".join(names)
+
+
+def fmt_tick(v):
+    """0.0005 -> '5e-4', 1e-05 -> '1e-5', 500 -> '500'."""
+    if v == 0:
+        return "0"
+    if abs(v) < 0.01:
+        mantissa, exp = f"{v:.1e}".split("e")
+        return f"{mantissa.rstrip('0').rstrip('.')}e{int(exp)}"
+    return f"{v:g}"
+
+
+def save(paths: list):
+    """Save for multiple paths, and also it could be more formats if needed"""
+    for path in paths:
+        for ext in ["png"]:
+            plt.savefig(path.with_suffix(f".{ext}"), dpi=300, bbox_inches="tight")
     plt.close()
 
 
-def plot_simple_line(df, param, target, group_cols, out: Path):
-    groups = list(df.groupby(group_cols)) if group_cols else [("all", df)]
-    fig, ax = plt.subplots(figsize=(5, 4))
-    for key, sub in groups:
-        agg = sub.groupby(param)[target].mean().sort_index()
-        ax.plot(agg.index.astype(str), agg.values, marker="o")
-    ax.set_title(param.replace("param_", ""))
-    ax.set_ylabel(target)
-    if group_cols:
-        ax.legend([_group_label(k) for k, _ in groups], fontsize=7)
-    plt.tight_layout()
-    plt.savefig(out, dpi=150)
-    plt.close()
+def range_panel(ax, df, param, legend=False):
+    agg = df.groupby(param)[TARGET].agg(["min", "mean", "max"]).sort_index()
+    x = [fmt_tick(v) for v in agg.index]
+    for stat in ("min", "mean", "max"):
+        ax.plot(x, agg[stat], label=stat, **RANGE_STYLE[stat])
+    ax.grid(alpha=0.25, linewidth=0.5)
+    ax.spines[["top", "right"]].set_visible(False)
+    if legend:
+        ax.legend(fontsize=8, frameon=False)
 
 
-def _plot_range_panels(panels: list, target, out: Path, cmap_name="Blues"):
-    """panels: list of (label, sub_df, param) — one panel per entry."""
-    cmap = plt.get_cmap(cmap_name)
-    style = {
-        "min":  dict(color=cmap(0.40), linestyle=":", linewidth=1.6, marker="o", markersize=4, alpha=1.0, zorder=2),
-        "mean": dict(color=cmap(0.65), linestyle="--", linewidth=1.8, marker="s", markersize=5, alpha=1.0, zorder=3),
-        "max":  dict(color=cmap(0.95), linestyle="-", linewidth=2, marker="D", markersize=6, alpha=1.0, zorder=4),
-    }
-
-    title_map = {
-        'closest': 'close',
-        'medium': 'middle',
-        'farthest': 'far',
-        'average': 'average',
-    }
-
-
-    fig, axes = plt.subplots(1, len(panels), figsize=(4 * len(panels), 3.4), squeeze=False, sharey="row")
-    for j, (label, sub, param) in enumerate(panels):
-        ax = axes[0][j]
-        agg = sub.groupby(param)[target].agg(["min", "mean", "max"]).sort_index()
-        x = agg.index.astype(str)
-        for stat in ("min", "mean", "max"):
-            ax.plot(x, agg[stat], label=stat, **style[stat])
-        ax.set_title(title_map.get(label, label), fontsize=12, fontweight="bold")
-        ax.grid(alpha=0.25, linewidth=0.5)
-        ax.spines["top"].set_visible(False)
-        ax.spines["right"].set_visible(False)
-        if j == 0:
-            ax.set_ylabel('Harmonic mean AUC', fontsize=12)
-        if j == len(panels) - 1:
-            ax.legend(fontsize=8, frameon=False)
-    
-    # x axis
-    for ax in axes[0]:
-        ax.set_xlabel("$w_{PO}$", fontsize=12)
-
-    plt.tight_layout()
-    plt.savefig(out, dpi=200)
-    plt.close()
-
-
-def plot_range(df, param, target, group_cols, out: Path, cmap_name="Blues"):
-    """One panel per group (e.g. loss combo) — min/mean/max vs param."""
-    groups = list(df.groupby(group_cols)) if group_cols else [("all", df)]
-    panels = [(_group_label(key) if group_cols else target, sub, param) for key, sub in groups]
-    _plot_range_panels(panels, target, out, cmap_name)
-
-
-def plot_wpo_by_distance(df_raw, loss_po_name, loss_pa_name, target, out: Path,
-                          options=OPTIONS_ORDER, cmap_name="Blues"):
-    """One panel per distance (option) plus one 'average' panel, for a
-    single fixed loss combo — the featured w_po plot for the main text.
-
-    The 'average' panel first averages over option PER COMBO (same as
-    df_avg elsewhere), then takes min/mean/max ACROSS combos of that
-    averaged value — not a pool of raw rows across options, which would
-    mix distance-driven spread into what should be hyperparameter-driven
-    spread only.
-    """
-    sub_loss = df_raw[(df_raw["param_loss_po_name"] == loss_po_name)
-                       & (df_raw["param_loss_pa_name"] == loss_pa_name)]
-
-    param_cols = [c for c in sub_loss.columns if c.startswith("param_") and c not in EXCLUDE_COLS]
-    sub_loss_avg = sub_loss.groupby(param_cols, as_index=False)[target].mean()  # collapse option first
-
-    panels = [(opt.replace("_val", ""), sub_loss[sub_loss["option"] == opt], "param_w_po") for opt in options]
-    panels.append(("average", sub_loss_avg, "param_w_po"))
-    _plot_range_panels(panels, target, out, cmap_name)
-
-
-def resolve_covariates(df, group_cols):
-    return [c for c in df.columns if c.startswith("param_") and c not in group_cols
-            and c not in EXCLUDE_COLS and df[c].nunique() > 1]
-
-
-def run_method(tune_dir: Path, method: str):
-    csv_path = tune_dir / f"summary_{method}.csv"
-    if not csv_path.exists():
-        print(f"[{method}] no summary CSV found, skipping.")
+# ---------------------------------------------------------------------------
+# Figures
+# ---------------------------------------------------------------------------
+def fig_wpo_by_distance(df, out: list):
+    """One panel per distance + 'average' (configurations averaged over distance first,
+    so its spread comes from hyperparameters only)."""
+    sub = select_loss(df, "popa", BEST_LOSS["popa"])
+    if sub.empty:
         return
+    panels = [(opt.replace("_val", ""), sub[sub["option"] == opt]) for opt in OPTIONS]
+    panels.append(("average", average_over_distance(sub)))
 
-    df_raw = pd.read_csv(csv_path)
-    if EXCLUDE_WPO_EDGES and "param_w_po" in df_raw.columns:
-        n_before = len(df_raw)
-        df_raw = df_raw[(df_raw["param_w_po"] > 0) & (df_raw["param_w_po"] < 1)]
-        print(f"[{method}] excluded w_po edges: {n_before} -> {len(df_raw)} rows")
-
-
-    param_cols = [c for c in df_raw.columns if c.startswith("param_") and c not in EXCLUDE_COLS]
-    df_avg = df_raw.groupby(param_cols, as_index=False)[TARGET].mean()
-
-    ### little plot to see sensitivity of losses    
-    # print(method)
-    # print(df_avg)
-    # #
-    # std = df_avg.groupby('param_loss_name')[TARGET].std()
-    # print(std)
-    
-    # #boxplot each loss_name
-    # df_avg.boxplot(column=TARGET, by='param_loss_name', grid=False, figsize=(8,6))
-    # plt.title(f"{method} - {TARGET} by loss_name")
-    # plt.suptitle("")
-    # plt.xlabel("Loss Name")
-    # plt.ylabel(TARGET)
-    # plt.savefig(tune_dir / f"{method}_boxplot_{TARGET}_by_loss_name.png", dpi=150)
-    # # where saved
-    # print(f"[{method}] boxplot saved to {tune_dir / f'{method}_boxplot_{TARGET}_by_loss_name.png'}")
-    # plt.close()
-
-    # exit()
-
-    group_cols = GROUP_COLS[method]
-    covariates = resolve_covariates(df_avg, group_cols)
-    print(f"[{method}] covariates: {covariates}")
-
-    out_dir = tune_dir / "analysis" / method
-    reg_dir, plot_dir = out_dir / "regression", out_dir / "plots"
-    reg_dir.mkdir(parents=True, exist_ok=True)
-    plot_dir.mkdir(parents=True, exist_ok=True)
-
-    reg_results = _run_per_group(df_avg, covariates, TARGET, group_cols, _fit_regression)
-    with open(reg_dir / "regression.txt", "w") as f:
-        for label, (coefs, r2) in reg_results.items():
-            f.write(f"[{label}] R^2={r2:.3f}\n{coefs.to_string()}\n\n")
-
-    rf_results = _run_per_group(df_avg, covariates, TARGET, group_cols, _fit_rf)
-    with open(reg_dir / "rf_importance.txt", "w") as f:
-        for label, (imp, oob) in rf_results.items():
-            f.write(f"[{label}] OOB R^2={oob:.3f}\n{imp.to_string()}\n\n")
-    plot_importance(rf_results, reg_dir / "rf_importance.png")
-
-    for c in covariates:
-        plot_simple_line(df_avg, c, TARGET, group_cols, plot_dir / f"{c.replace('param_', '')}.png")
-
-    if method == "popa" and "param_w_po" in df_raw.columns:
-        loss_po, loss_pa = BEST_LOSS_COMBO
-        plot_wpo_by_distance(df_raw, loss_po, loss_pa, TARGET, plot_dir / "w_po_by_distance.png")
-
-    print(f"[{method}] done -> {out_dir}")
+    fig, axes = plt.subplots(1, len(panels), figsize=(4 * len(panels), 3.4), sharey=True)
+    for j, (label, d) in enumerate(panels):
+        range_panel(axes[j], d, "param_w_po", legend=(j == len(panels) - 1))
+        axes[j].set_title(DISTANCE_LABELS[label], fontsize=12, fontweight="bold")
+        axes[j].set_xlabel("$w_{PO}$", fontsize=12)
+    axes[0].set_ylabel(YLABEL, fontsize=12)
+    plt.tight_layout()
+    save(out)
 
 
+def fig_hyperparams(dfs_avg: dict, out: list):
+    """Rows = methods (selected loss), columns = hyperparameters (w_PO is in its own figure)."""
+    rows = [(m, drop_wpo_edges(select_loss(df, m, BEST_LOSS[m]))) for m, df in dfs_avg.items()]
+    rows = [(m, sub) for m, sub in rows if not sub.empty]
+    if not rows:
+        return
+    varying = lambda sub, m: [p for p in hyperparams(sub, m) if sub[p].nunique() > 1 and p != "param_w_po"]
+    found = {p for m, sub in rows for p in varying(sub, m)}
+    params = [p for p in PARAM_LABELS if p in found] + sorted(found - set(PARAM_LABELS))
+
+    fig, axes = plt.subplots(len(rows), len(params), figsize=(3.2 * len(params), 2.8 * len(rows)),
+                             sharey="row", squeeze=False)
+    for i, (method, sub) in enumerate(rows):
+        for j, param in enumerate(params):
+            ax = axes[i][j]
+            if param not in varying(sub, method):
+                ax.axis("off")
+                continue
+            range_panel(ax, sub, param, legend=(i == 0 and j == len(params) - 1))
+            ax.set_xlabel(param_label(param), fontsize=10)
+        axes[i][0].set_ylabel(f"{METHOD_LABELS[method]}\n{loss_label(BEST_LOSS[method])}\n{YLABEL}",
+                              fontsize=9)
+    plt.tight_layout()
+    save(out)
+
+
+def fig_loss_tuning(dfs_avg: dict, out: list):
+    """One panel per method, one box per loss, over all sampled configurations."""
+    panels, summary = [], []
+    for method, df in dfs_avg.items():
+        df = drop_wpo_edges(df)
+        groups = [(loss_label(key if isinstance(key, tuple) else (key,)), sub[TARGET].values)
+                  for key, sub in df.groupby(LOSS_COLS[method])]
+        groups.sort(key=lambda g: -np.median(g[1]))
+        panels.append((method, groups))
+        summary += [dict(method=METHOD_LABELS[method], loss=label, n_configs=len(s),
+                         best=s.max(), median=np.median(s), std=s.std(),
+                         gap_best_median=s.max() - np.median(s)) for label, s in groups]
+
+    widths = [len(groups) for _, groups in panels]
+    fig, axes = plt.subplots(1, len(panels), figsize=(1.2 * sum(widths) + 2, 4.5),
+                             gridspec_kw=dict(width_ratios=widths), squeeze=False)
+    for ax, (method, groups) in zip(axes[0], panels):
+        ax.boxplot([s for _, s in groups], widths=0.6, medianprops=dict(color="black"),
+                   flierprops=dict(marker="o", markersize=3, alpha=0.5))
+        ax.set_xticks(range(1, len(groups) + 1), [label for label, _ in groups],
+                      rotation=30, ha="right", fontsize=9)
+        ax.set_title(METHOD_LABELS[method], fontsize=11, fontweight="bold")
+        ax.grid(axis="y", alpha=0.25, linewidth=0.5)
+        ax.spines[["top", "right"]].set_visible(False)
+    axes[0][0].set_ylabel(YLABEL, fontsize=10)
+    plt.tight_layout()
+    save(out)
+
+    table = pd.DataFrame(summary).round(4)
+    for path in out:
+        table.to_csv(path.with_suffix(".csv"), index=False)
+    print("\n" + table.to_string(index=False))
+
+
+# ---------------------------------------------------------------------------
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--tune_dir", type=Path, default=None)
@@ -261,14 +258,26 @@ def main():
     parser.add_argument("--region", type=str, default="france")
     parser.add_argument("--split_type", type=str, default="geographical")
     parser.add_argument("--test_number", type=int, default=0)
+    parser.add_argument("--out_dir", type=Path, default=Path("outputs/figures/tuning"))
     args = parser.parse_args()
 
     tune_dir = args.tune_dir or Path(
-        f"outputs/tune/{args.dataset}/{args.region}/{args.split_type}/test_{args.test_number}"
-    )
+        f"outputs/tune/{args.dataset}/{args.region}/{args.split_type}/test_{args.test_number}")
+    out_dirs = [args.out_dir, tune_dir / "figures"]  # paper folder + next to the data
+    for d in out_dirs:
+        d.mkdir(parents=True, exist_ok=True)
+    name = lambda fig: [d / f"{fig}_{args.split_type}" for d in out_dirs]
 
-    for method in ("pa", "po", "popa"):
-        run_method(tune_dir, method)
+    dfs = {m: df for m in ("pa", "po", "popa") if (df := load(tune_dir, m)) is not None}
+    for m, df in dfs.items():
+        check(df, m)
+    dfs_avg = {m: average_over_distance(df) for m, df in dfs.items()}
+
+    if "popa" in dfs:
+        fig_wpo_by_distance(dfs["popa"], name("w_po_by_distance"))
+    fig_hyperparams(dfs_avg, name("hyperparams"))
+    fig_loss_tuning(dfs_avg, name("loss_tuning"))
+    print(f"\nFigures written to {', '.join(map(str, out_dirs))}")
 
 
 if __name__ == "__main__":

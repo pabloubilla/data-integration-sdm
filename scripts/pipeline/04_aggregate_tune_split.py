@@ -45,7 +45,7 @@ def build_summary(results: list[dict], method: str) -> pd.DataFrame:
 
 def best_result_per_loss_and_option(
     summary_df: pd.DataFrame,
-    loss_cols: list[str],
+    loss_cols: list[str]
 ) -> pd.DataFrame:
     """
     Best param combo per (loss combo, option), ranked by harmonic_mean_auc.
@@ -75,6 +75,7 @@ def best_result_per_loss_and_option(
 def best_result_avg_over_distance(
     summary_df: pd.DataFrame,
     group_cols: list[str],
+    exclude_degenerate_cols: list[str] = None
 ) -> pd.DataFrame:
     """
     Best param combo, AVERAGED across all distances/options, with one
@@ -85,6 +86,12 @@ def best_result_avg_over_distance(
         raise ValueError(f"group_cols not found in summary: {missing}")
 
     param_cols = [c for c in summary_df.columns if c.startswith("param_")]
+
+    if exclude_degenerate_cols is not None:
+        # exclude 0 and 1
+        for col in exclude_degenerate_cols:
+            if col in summary_df.columns:
+                summary_df = summary_df[(summary_df[col] != 0) & (summary_df[col] != 1)]
 
     agg = (
         summary_df
@@ -112,7 +119,9 @@ def best_result_avg_over_distance(
     keep_cols = param_cols + ["n_splits", "best_epoch", "avg_auc_site", "avg_auc_species", "mean_auc", "harmonic_mean_auc"]
     return best[[c for c in keep_cols if c in best.columns]]
 
-def aggregate_method(tune_dir: Path, method: str, group_cols: list[str]) -> pd.DataFrame | None:
+def aggregate_method(tune_dir: Path, method: str, group_cols: list[str], 
+                     exclude_degenerate_cols: list[str] = None # used for excluding the extreme case of w_po which is equivalent to single-source method
+                     ) -> pd.DataFrame | None:
     trials_dir = tune_dir / f"trials_{method}"
     results = load_all_trial_results(trials_dir)
     if not results:
@@ -132,7 +141,7 @@ def aggregate_method(tune_dir: Path, method: str, group_cols: list[str]) -> pd.D
     summary.to_csv(tune_dir / f"summary_{method}.csv", index=False)
     print(f"[{method}] {len(results)} trials -> summary_{method}.csv")
 
-    best_avg = best_result_avg_over_distance(summary, group_cols=group_cols)
+    best_avg = best_result_avg_over_distance(summary, group_cols=group_cols, exclude_degenerate_cols=exclude_degenerate_cols)
     best_avg.to_csv(tune_dir / f"best_{method}_avg_over_distance.csv", index=False)
     print(f"[{method}] -> best_{method}_avg_over_distance.csv")
 
@@ -152,7 +161,7 @@ def main():
     summaries = {}
     summaries["pa"] = aggregate_method(args.tune_dir, "pa", group_cols=["param_loss_name"])
     summaries["po"] = aggregate_method(args.tune_dir, "po", group_cols=["param_loss_name"])
-    summaries["popa"] = aggregate_method(args.tune_dir, "popa", group_cols=LOSS_COLS_POPA)
+    summaries["popa"] = aggregate_method(args.tune_dir, "popa", group_cols=LOSS_COLS_POPA, exclude_degenerate_cols = ['param_w_po'])
 
     present = [s for s in summaries.values() if s is not None]
     if len(present) > 1:

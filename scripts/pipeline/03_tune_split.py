@@ -27,8 +27,8 @@ from isdm.tune import run_grid_search, build_trial_combos
 # ─────────────────────────────────────────────
 #  Which methods to run
 # ─────────────────────────────────────────────
-RUN_PA = False
-RUN_PO = False
+RUN_PA = True
+RUN_PO = True
 RUN_POPA = True
 
 # MAX_WORKERS = 16   # 1 = sequential. Set based on what timing experiment showed.
@@ -44,7 +44,7 @@ VAL_PATIENCE = 5
 # N_TRIALS_PA = 250
 PARAM_GRID_PA = {
     "lr":            [5e-3, 1e-3, 5e-4, 1e-4],
-    "weight_decay":  [1e-3, 1e-4, 1e-5, 0],
+    "weight_decay":  [0, 1e-3, 1e-4, 1e-5],
     "hidden_dim":    [100, 250, 500, 1000],
     "hidden_layers": [1,2,3],
     "batch_size":    [50,100,200,500,1000],
@@ -57,7 +57,7 @@ LOSS_NAMES_PA = ["bce", "balanced_bce"]
 # N_TRIALS_PO = 250
 PARAM_GRID_PO = {
     "lr":            [5e-3, 1e-3, 5e-4, 1e-4],
-    "weight_decay":  [1e-3, 1e-4, 1e-5, 0],
+    "weight_decay":  [0, 1e-3, 1e-4, 1e-5],
     "hidden_dim":    [100, 250, 500, 1000],
     "hidden_layers": [1,2,3],
     "batch_size":    [50,100,200,500,1000],
@@ -70,19 +70,19 @@ LOSS_NAMES_PO = ["deep_maxent", "balanced_bce", "bce"]
 # N_TRIALS_POPA = 250
 PARAM_GRID_POPA = {
     "lr":            [5e-3, 1e-3, 5e-4, 1e-4],
-    "weight_decay":  [1e-3, 1e-4, 1e-5, 0],
+    "weight_decay":  [0, 1e-3, 1e-4, 1e-5],
     "hidden_dim":    [100, 250, 500, 1000],
     "hidden_layers": [1,2,3],
     "batch_size":    [50,100,200,500,1000],
 }
 LOSS_COMBOS_POPA = [
-    # ("deep_maxent", "balanced_bce_ippp"),
-    # ("deep_maxent", "balanced_bce"),
-    # ("deep_maxent", "bce"),
-    # ("deep_maxent", "bce_ippp"),
-    # ("balanced_bce", "balanced_bce"),
-    ("bce", "bce")
-    # ("deep_maxent", "deep_maxent"),
+    ("deep_maxent", "balanced_bce_ippp"),
+    ("deep_maxent", "balanced_bce"),
+    ("deep_maxent", "bce"),
+    ("deep_maxent", "bce_ippp"),
+    ("balanced_bce", "balanced_bce"),
+    ("bce", "bce"),
+    ("deep_maxent", "deep_maxent"),
 ]
 W_PA_PO_PAIRS = [
     (0.0, 1.0),

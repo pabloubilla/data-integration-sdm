@@ -15,6 +15,9 @@ from isdm.losses import LOSS_REGISTRY, IntegratedLoss
 from isdm.models import MLP
 from isdm.splits import filter_and_remap, load_split, load_split_specs, make_loader, subset_list, train_double_source, train_single_source
 from isdm.utils import get_device
+from statsmodels.nonparametric.smoothers_lowess import lowess
+
+
 
 COORD_COLS = ["lon", "lat"]  # never fed to the model
 
@@ -39,6 +42,7 @@ def parse_args():
     args.config_name = f"po_{args.loss_po_name}_pa_{args.loss_pa_name}"
     args.pa_config_name = f"pa_{args.loss_pa_name}"
     return args
+
 
 
 def load_best_params(args):
@@ -151,9 +155,35 @@ def retrain_pa_model(s, args, covariates, pa_best, device):
     return model, scaler
 
 
-def plot_auc_vs_distance(df, path, log_x=True):
+def add_smoothed_mean(ax, x, y, n_bins=100, window=3, color="black", label="smoothed mean"):
+    d = pd.DataFrame({"x": np.asarray(x), "y": np.asarray(y)}).dropna()
+    d["bin"] = pd.qcut(d["x"], n_bins, duplicates="drop")
+    g = d.groupby("bin", observed=True).agg(x=("x", "median"), y=("y", "mean"))
+    y_s = g["y"].rolling(window, center=True, min_periods=1).mean()
+    ax.plot(g["x"], y_s, color=color, linewidth=2, label=label)
+    ax.legend(loc="best", frameon=False)
+
+
+def add_lowess(ax, x, y, log_x=True, frac=0.05, color="#E08214", label="LOWESS"):
+    d = pd.DataFrame({"x": np.asarray(x, dtype=float), "y": np.asarray(y, dtype=float)}).dropna()
+    if log_x:
+        d = d[d["x"] > 0]  # log10 undefined at 0; these sites are not visible on a log axis anyway
+        xs = np.log10(d["x"].to_numpy())
+    else:
+        xs = d["x"].to_numpy()
+    fit = lowess(d["y"].to_numpy(), xs, frac=frac, delta=0.01 * np.ptp(xs))
+    x_fit = 10 ** fit[:, 0] if log_x else fit[:, 0]
+    ax.plot(x_fit, fit[:, 1], color=color, linewidth=2, label=label)
+    ax.legend(loc="best", frameon=False)
+
+
+def plot_auc_vs_distance(df, path, log_x=True, smooth_mean=True, smooth_lowess=True, lowess_frac=0.05):
     fig, ax = plt.subplots(figsize=(6, 5))
-    ax.scatter(df["distance_to_po_km"], df["site_auc"], s=4, alpha=0.15, c="#2166AC")
+    ax.scatter(df["distance_to_po_km"], df["site_auc"], s=1, alpha=0.15, c="#2166AC")
+    if smooth_mean:
+        add_smoothed_mean(ax, df["distance_to_po_km"], df["site_auc"])
+    if smooth_lowess:
+        add_lowess(ax, df["distance_to_po_km"], df["site_auc"], log_x=log_x, frac=lowess_frac)
     if log_x:
         ax.set_xscale("log")
     ax.set_xlabel("distance to nearest PO record (km)")
@@ -194,6 +224,61 @@ def plot_auc_with_both_distances(df, path, log_scale=True):
     fig.tight_layout()
     fig.savefig(path / "po_distance_analysis_with_pa_distance.png", dpi=200)
     plt.close(fig)
+
+
+def plot_auc_by_pa_distance_bins(df, path, bins=(0, 10, 100, np.inf), log_x=True, lowess_frac=0.1, min_sites=50):
+    d = df.dropna(subset=["distance_to_po_km", "distance_to_pa_train_km", "site_auc"])
+    labels = [f"{lo:g}–{hi:g} km" if np.isfinite(hi) else f">{lo:g} km" for lo, hi in zip(bins[:-1], bins[1:])]
+    d = d.assign(pa_bin=pd.cut(d["distance_to_pa_train_km"], bins=bins, labels=labels, include_lowest=True))
+    colors = plt.cm.viridis(np.linspace(0, 0.9, len(labels)))
+
+    n = len(labels) + 1
+    fig, axes = plt.subplots(1, n, figsize=(3.2 * n, 3.6), sharex=True, sharey=True)
+    for ax, lab, color in zip(axes, labels, colors):
+        g = d[d["pa_bin"] == lab]
+        ax.scatter(g["distance_to_po_km"], g["site_auc"], s=1, alpha=0.2, c=[color])
+        ax.set_title(f"PA dist {lab} (n={len(g)})", fontsize=9)
+        if len(g) >= min_sites:
+            add_lowess(ax, g["distance_to_po_km"], g["site_auc"], log_x=log_x, frac=lowess_frac, color="black")
+            add_lowess(axes[-1], g["distance_to_po_km"], g["site_auc"], log_x=log_x, frac=lowess_frac, color=color, label=lab)
+    axes[-1].set_title("LOWESS per PA-distance bin", fontsize=9)
+
+    for ax in axes:
+        if log_x:
+            ax.set_xscale("log")
+        ax.set_xlabel("distance to nearest PO (km)")
+    axes[0].set_ylabel("site-level AUC")
+    fig.tight_layout()
+    fig.savefig(path / "po_distance_by_pa_bins.png", dpi=200)
+    plt.close(fig)
+
+
+def plot_auc_delta_by_pa_distance_bins(df, path, bins=(0, 10, 100, np.inf), log_x=True, lowess_frac=0.1, min_sites=50):
+    d = df.dropna(subset=["distance_to_po_km", "distance_to_pa_train_km", "delta_auc"])
+    labels = [f"{lo:g}–{hi:g} km" if np.isfinite(hi) else f">{lo:g} km" for lo, hi in zip(bins[:-1], bins[1:])]
+    d = d.assign(pa_bin=pd.cut(d["distance_to_pa_train_km"], bins=bins, labels=labels, include_lowest=True))
+    colors = plt.cm.viridis(np.linspace(0, 0.9, len(labels)))
+
+    n = len(labels) + 1
+    fig, axes = plt.subplots(1, n, figsize=(3.2 * n, 3.6), sharex=True, sharey=True)
+    for ax, lab, color in zip(axes, labels, colors):
+        g = d[d["pa_bin"] == lab]
+        ax.scatter(g["distance_to_po_km"], g["delta_auc"], s=1, alpha=0.2, c=[color])
+        ax.set_title(f"PA dist {lab} (n={len(g)})", fontsize=9)
+        if len(g) >= min_sites:
+            add_lowess(ax, g["distance_to_po_km"], g["delta_auc"], log_x=log_x, frac=lowess_frac, color="black")
+            add_lowess(axes[-1], g["distance_to_po_km"], g["delta_auc"], log_x=log_x, frac=lowess_frac, color=color, label=lab)
+    axes[-1].set_title("LOWESS per PA-distance bin", fontsize=9)
+
+    for ax in axes:
+        if log_x:
+            ax.set_xscale("log")
+        ax.set_xlabel("distance to nearest PO (km)")
+    axes[0].set_ylabel("site-level AUC delta")
+    fig.tight_layout()
+    fig.savefig(path / "po_distance_delta_by_pa_bins.png", dpi=200)
+    plt.close(fig)
+
 
 def main():
     args = parse_args()
@@ -258,6 +343,8 @@ def main():
     plot_auc_vs_distance(df, out_dir)
     plot_delta_vs_distance(df, out_dir)
     plot_auc_with_both_distances(df, out_dir)
+    plot_auc_by_pa_distance_bins(df, out_dir, bins=(0, 10, 100, np.inf), log_x=True, lowess_frac=0.1, min_sites=50)
+    plot_auc_delta_by_pa_distance_bins(df, out_dir, bins=(0, 10, 100, np.inf), log_x=True, lowess_frac=0.1, min_sites=50)
 
     print(f"Saved -> {out_dir}")
 

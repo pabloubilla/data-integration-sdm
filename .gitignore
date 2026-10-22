@@ -29,3 +29,5 @@ shell_scripts/
 figures_paper/
 outputs_paper/
 outputs_trial/
+
+backup_not_in_paper/

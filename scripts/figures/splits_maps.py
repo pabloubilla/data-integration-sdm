@@ -1,19 +1,11 @@
 """
-Builds a paper figure comparing example geographical and environmental
+Builds a figure comparing example geographical and environmental
 splits, side by side, with the PO dataset shown as a shared background
 layer across every panel.
 
-Reads splits already generated and saved by scripts/generate_splits.py
-(via save_split_specs), so it never recomputes clustering or anchors —
-it only loads and plots.
+Reads splits already generated stored in output/splits
 
-Usage:
-    python scripts/plot_paper_figure.py \
-        --geo_split_dir outputs/splits/GeoPlant/france_bands/geographical \
-        --env_split_dir outputs/splits/GeoPlant/france_bands/environmental \
-        --data_path data/processed/GeoPlant/france \
-        --n_splits 3 \
-        --output outputs/figures/splits_map.png
+This creates both the main figure (with 3 selected anchors for visual purposes) in France, and the full display of each region for supporting information in the paper.
 """
 
 import argparse
@@ -31,6 +23,9 @@ except ImportError:
     HAS_CARTOPY = False
 
 from matplotlib.lines import Line2D
+
+from isdm.load_data import load_geoplant_processed  
+
 
 OPTIONS_ORDER = ("test", "closest", "middle", "farthest")
 
@@ -99,8 +94,6 @@ def _new_axis(fig, gs_slot, use_cartopy: bool, projection=None):
 
 def _style_axis(ax, x_lim, y_lim, use_cartopy: bool):
     if use_cartopy:
-        # data stays in lon/lat (PlateCarree) regardless of the axes' own
-        # display projection — this just defines the visible window
         ax.set_extent([*x_lim, *y_lim], crs=ccrs.PlateCarree())
         ax.add_feature(cfeature.OCEAN, facecolor="#dceefb", zorder=0)
         ax.add_feature(cfeature.LAND, facecolor="#f7f5f0", zorder=0)
@@ -109,11 +102,6 @@ def _style_axis(ax, x_lim, y_lim, use_cartopy: bool):
     else:
         ax.set_xlim(x_lim)
         ax.set_ylim(y_lim)
-        # raw lon/lat isn't Cartesian: 1° longitude covers cos(lat) as much
-        # ground distance as 1° latitude, so a plain "equal" aspect stretches
-        # the map horizontally at mid-latitudes (e.g. France, ~46-47°N).
-        # This is the fallback-only fix; the cartopy path handles it via
-        # the LambertConformal display projection instead.
         mean_lat = (y_lim[0] + y_lim[1]) / 2
         ax.set_aspect(1 / np.cos(np.deg2rad(mean_lat)))
         ax.set_facecolor("#f7f5f0")
@@ -165,15 +153,15 @@ def plot_paper_splits_figure(
             x_lim = (-5, 8.5)
             y_lim = (42, 51.5)
         elif region == "denmark":
-            # Jutland + islands + Bornholm (~14.9E), Skagen at ~10.6E / 57.75N
+
             x_lim = (7.8, 15.3)
             y_lim = (54.4, 57.9)
         elif region == "bene":
-            # Belgium + Netherlands (incl. Wadden islands up top, Limburg down south)
+            # Belgium + Netherlands 
             x_lim = (2.4, 7.3)
             y_lim = (49.4, 53.7)
         elif region == "sparse_pa":
-            # Central + Eastern Europe (roughly Germany/Poland/Baltics to Ukraine/Romania/Balkans)
+            # Central + Eastern Europe 
             x_lim = (5, 25)
             y_lim = (35, 55)
 
@@ -181,11 +169,6 @@ def plot_paper_splits_figure(
     if not use_cartopy:
         print("cartopy not available — falling back to plain scatter (no basemap).")
 
-    # Display projection for all cartopy axes: data is supplied in lon/lat
-    # (transform=PlateCarree() below) but rendered in a projected CRS
-    # centered on the region, which is what actually fixes the "too wide"
-    # distortion — PlateCarree as a *display* projection has no correction
-    # for meridian convergence at non-equatorial latitudes.
     display_proj = None
     if use_cartopy:
         central_lon = float(np.mean(x_lim))
@@ -226,18 +209,15 @@ def plot_paper_splits_figure(
                            width_ratios=width_ratios, height_ratios=height_ratios)
 
 
-    # ── left panel: PO shown once, spanning the full height ────────────
+    # ── left panel: PO shown once, using the full height ────────────
     po_ax = _new_axis(fig, gs[:, 0], use_cartopy, projection=display_proj)
     _style_axis(po_ax, x_lim, y_lim, use_cartopy)
     po_kw = {"transform": ccrs.PlateCarree()} if use_cartopy else {}
     po_ax.scatter(X_po_plot[:, 0], X_po_plot[:, 1],
                   c=COLOR_MAP["po"], s=.1, alpha=0.3, linewidths=0, zorder=1, **po_kw)
-    # title above reads awkwardly on a tall narrow panel — put it as an
-    # ylabel-style rotated text instead, or keep as a wrapped title
-    # po_ax.set_title(LEGEND_LABEL_PO + "\n(constant across\nall splits)", fontsize=10)
 
 
-    # ── grid: rows = split examples, columns = (block, band) pairs ─────
+    # grid: rows are anchors and columns are the pairings
     top_row_axes = {}
     for row in range(n_rows_data):
         for col, (block_name, by_anchor, anchors, option) in enumerate(col_defs):
@@ -308,16 +288,24 @@ def plot_paper_splits_figure(
 
 
 def main():
-    from isdm.load_data import load_geoplant_processed  # local import: only needed for the CLI entry point
  
-    # regions = ["france", "denmark", "bene", "sparse_pa"] # for supporting information in the paper
-    regions = ["france"]  # for main figure
+    regions = ["france", "denmark", "bene", "sparse_pa"] # for supporting information in the paper
+    # regions = ["france"]  # for main figure
+
+    # for supporting information, we can show all 10 anchors (k=1..10) for each split type
+    geo_split_list = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+    env_split_list = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+
+    # for main figure, selected anchors that are visually distinct
+    geo_split_list_main = [0, 3, 7]
+    env_split_list_main = [1, 5, 9]
+
+    output_dir = Path('outputs') / 'figures' / 'splits_maps'
 
     for region in regions:
 
-        data_path = f"data/processed/GeoPlant/{region}"
-        split_dir = Path(f"outputs/splits/GeoPlant/{region}_bands")
-        
+        data_path = Path("data") / "processed" / "GeoPlant" / region
+        split_dir = Path('outputs') / 'splits' / 'GeoPlant' / f"{region}_bands"
 
 
         data = load_geoplant_processed(data_path, add_coordinates=True)
@@ -327,18 +315,12 @@ def main():
         specs_geo = load_saved_specs(split_dir / "geographical")
         specs_env = load_saved_specs(split_dir / "environmental")
  
-        # for supporting information, we can show all 10 anchors (k=1..10) for each split type
-        geo_split_list = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
-        env_split_list = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
 
-        # for main figure, selected anchors that are visually distinct
-        geo_split_list = [0, 3, 7]
-        env_split_list = [1, 5, 9]
 
         len_geo = len(pick_example_anchors(specs_geo, geo_split_list))
-        len_env = len(pick_example_anchors(specs_env, env_split_list))
+        # len_env = len(pick_example_anchors(specs_env, env_split_list))
 
-        output_path = Path(f"outputs/figures/splits_maps_{region}_{len_geo}.png")
+        fig_path = output_dir / f"splits_maps_{region}_{len_geo}.png"
 
         plot_paper_splits_figure(
             X_pa=X_pa,
@@ -347,39 +329,23 @@ def main():
             env_specs=specs_env,
             geo_split_list=geo_split_list,
             env_split_list=env_split_list,
-            output_path=output_path,
+            output_path=fig_path,
             region=region
         )
 
-    # parser = argparse.ArgumentParser()
-    # parser.add_argument("--geo_split_dir", type=Path,
-    #                      default=Path("outputs/splits/GeoPlant/france_bands/geographical"))
-    # parser.add_argument("--env_split_dir", type=Path,
-    #                      default=Path("outputs/splits/GeoPlant/france_bands/environmental"))
-    # parser.add_argument("--data_path", type=str, default="data/processed/GeoPlant/france")
-    # parser.add_argument("--output", type=Path, default=Path("outputs/figures/splits_maps.png"))
-    # args = parser.parse_args()
-
-    # data = load_geoplant_processed(args.data_path, add_coordinates=True)
-
-    # covs_plot = [c for c in ["lon", "lat", "x", "y"] if c in data.X_pa_train.columns][:2]
-    # X_pa = data.X_pa_train.reset_index(drop=True)[covs_plot].to_numpy()
-    # X_po = data.X_po.reset_index(drop=True)[covs_plot].to_numpy()
-
-    # geo_specs = load_saved_specs(args.geo_split_dir)
-    # env_specs = load_saved_specs(args.env_split_dir)
-
-    # plot_paper_splits_figure(
-    #     X_pa=X_pa,
-    #     X_po=X_po,
-    #     geo_specs=geo_specs,
-    #     env_specs=env_specs,
-    #     output_path=args.output,
-    #     ### Splits chosen to be schematic
-    #     # Note that the order is arbitrary (for intance there is nothing particular about k=1 or k=7)
-    #     geo_split_list=[0,1,2],
-    #     env_split_list=[2,0,6]
-    # )
+        if region == "france":
+            # also plot the main figure with selected anchors
+            output_path_main = output_dir / f"splits_maps_{region}_main.png"
+            plot_paper_splits_figure(
+                X_pa=X_pa,
+                X_po=X_po,
+                geo_specs=specs_geo,
+                env_specs=specs_env,
+                geo_split_list=geo_split_list_main,
+                env_split_list=env_split_list_main,
+                output_path=output_path_main,
+                region=region
+            )
 
 
 if __name__ == "__main__":

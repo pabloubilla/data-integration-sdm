@@ -42,7 +42,7 @@ split_types=("environmental" "geographical")   # one pipeline per entry, each on
 regions=("france")
 overlap_flags=("--use_overlapping_species")
 n_anchors=10
-n_trials=60
+n_trials=100
 
 N_GPUS=2
 N_CONCURRENT=${#split_types[@]}

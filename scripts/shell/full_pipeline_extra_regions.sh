@@ -31,12 +31,12 @@ echo
 # ─────────────────────────────────────────────
 #  Which stages to run
 # ─────────────────────────────────────────────
-RUN_PREPROCESS=false
-RUN_GENERATE_SPLITS=false
-RUN_TUNE=false
-RUN_AGGREGATE_TUNE=false
+RUN_PREPROCESS=true
+RUN_GENERATE_SPLITS=true
+RUN_TUNE=true
+RUN_AGGREGATE_TUNE=true
 RUN_FINAL_SWEEP=true
-RUN_PLOTS=false
+RUN_PLOTS=true
 
 # ─────────────────────────────────────────────
 #  Axes of variation

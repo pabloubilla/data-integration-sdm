@@ -98,3 +98,10 @@ Scripts in `scripts/figures/` produce the figures and tables of the article (wri
 | `split_sweep_results.py` | Figs 5–6, Tables 2 and S2–S5 | steps 1–3 |
 | `tune_results.py` | Fig. 7, Figs S1–S2 | tuning (step 1) |
 | `distance_to_po_effect.py` | Fig. S7 | steps 1–2 |
+
+
+### Using the benchmark with other methods
+
+The splits generated in step 2 are saved to `outputs/splits/` and do not depend on any model, so they can be reused to evaluate other SDM approaches under the same close/medium/far scenarios. Step 5 (`05_run_split_sweep.py`) shows how a method is trained and evaluated across all splits; new models or losses can be added in `src/isdm/` (`models.py`, `losses.py`) and run through the same script with some modification.
+
+We plan to provide a simpler, standalone script for evaluating new methods on this benchmark.
